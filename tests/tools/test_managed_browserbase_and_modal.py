@@ -87,13 +87,6 @@ def _install_fake_tools_package():
         is_interrupted=lambda: interrupt_event.is_set(),
         _interrupt_event=interrupt_event,
     )
-    sys.modules["tools.approval"] = types.SimpleNamespace(
-        detect_dangerous_command=lambda *args, **kwargs: None,
-        check_dangerous_command=lambda *args, **kwargs: {"approved": True},
-        check_all_command_guards=lambda *args, **kwargs: {"approved": True},
-        load_permanent_allowlist=lambda *args, **kwargs: [],
-        DANGEROUS_PATTERNS=[],
-    )
 
     class _Registry:
         def register(self, **kwargs):

@@ -80,7 +80,7 @@ _DEFAULT_EXPORT_EXCLUDE_ROOT = frozenset({
     "hermes-agent",         # repo checkout (multi-GB)
     ".worktrees",           # git worktrees
     "profiles",             # other profiles — never recursive-export
-    "bin",                  # installed binaries (tirith, etc.)
+    "bin",                  # installed binaries
     "node_modules",         # npm packages
     # Databases & runtime state
     "state.db", "state.db-shm", "state.db-wal",

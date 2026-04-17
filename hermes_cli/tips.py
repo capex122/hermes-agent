@@ -25,7 +25,6 @@ TIPS = [
     "/verbose cycles tool progress display: off → new → all → verbose.",
     "/reasoning high increases the model's thinking depth. /reasoning show displays the reasoning.",
     "/fast toggles priority processing for faster API responses (provider-dependent).",
-    "/yolo skips all dangerous command approval prompts for the rest of the session.",
     "/model lets you switch models mid-session — try /model sonnet or /model gpt-5.",
     "/model --global changes your default model permanently.",
     "/personality pirate sets a fun personality — 14 built-in options from kawaii to shakespeare.",
@@ -72,7 +71,6 @@ TIPS = [
     "hermes chat -q \"query\" runs a single non-interactive query and exits.",
     "hermes chat --max-turns 200 overrides the default 90-iteration limit per turn.",
     "hermes chat --checkpoints enables filesystem snapshots before every destructive file change.",
-    "hermes --yolo bypasses all dangerous command approval prompts for the entire session.",
     "hermes chat --source telegram tags the session for filtering in hermes sessions list.",
     "hermes -p work chat runs under a specific profile without changing your default.",
 
@@ -112,7 +110,6 @@ TIPS = [
     "Set compression.threshold: 0.50 to control when auto-compression fires (default: 50% of context).",
     "Set agent.max_turns: 200 to let the agent take more tool-calling steps per turn.",
     "Set file_read_max_chars: 200000 to increase the max content per read_file call.",
-    "Set approvals.mode: smart to let an LLM auto-approve safe commands and auto-deny dangerous ones.",
     "Set fallback_model in config.yaml to automatically fail over to a backup provider.",
     "Set privacy.redact_pii: true to hash user IDs and phone numbers before sending to the LLM.",
     "Set browser.record_sessions: true to auto-record browser sessions as WebM videos.",
@@ -202,13 +199,9 @@ TIPS = [
     "The gateway supports inactivity-based timeouts — active agents can run indefinitely.",
 
     # --- Security ---
-    "Dangerous command approval has 4 tiers: once, session, always (permanent allowlist), deny.",
-    "Smart approval mode uses an LLM to auto-approve safe commands and flag dangerous ones.",
     "SSRF protection blocks private networks, loopback, link-local, and cloud metadata addresses.",
-    "Tirith pre-exec scanning detects homograph URL spoofing and pipe-to-interpreter patterns.",
     "MCP subprocesses receive a filtered environment — only safe system vars pass through.",
     "Context files (.hermes.md, AGENTS.md) are security-scanned for prompt injection before loading.",
-    "command_allowlist in config.yaml permanently approves specific shell command patterns.",
 
     # --- Context & Compression ---
     "Context auto-compresses when it reaches the threshold — memories are flushed and history summarized.",
@@ -313,7 +306,6 @@ TIPS = [
     "Browser pages over 8000 tokens are auto-summarized by the auxiliary LLM before returning to the agent.",
     "The compressor does a cheap pre-pass: tool outputs over 200 chars are replaced with placeholders before the LLM runs.",
     "When compression fails, further attempts are paused for 10 minutes to avoid API hammering.",
-    "Long dangerous commands (>70 chars) get a 'view' option in the approval prompt to see the full text first.",
     "Audio level visualization shows ▁▂▃▄▅▆▇ bars during voice recording based on microphone RMS levels.",
     "Profile names cannot collide with existing PATH binaries — 'hermes profile create ls' would be rejected.",
     "hermes profile create backup --clone-all copies everything (config, keys, SOUL.md, memories, skills, sessions).",

@@ -478,7 +478,6 @@ class DiscordAdapter(BasePlatformAdapter):
     - Sending responses with Discord markdown
     - Thread support
     - Native slash commands (/ask, /reset, /status, /stop)
-    - Button-based exec approvals
     - Auto-threading for long conversations
     - Reaction-based feedback
     """
@@ -494,7 +493,7 @@ class DiscordAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.DISCORD)
         self._client: Optional[commands.Bot] = None
         self._ready_event = asyncio.Event()
-        self._allowed_user_ids: set = set()  # For button approval authorization
+        self._allowed_user_ids: set = set()
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
         # Voice channel state (per-guild)
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
@@ -2443,51 +2442,6 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 return None
 
-    async def send_exec_approval(
-        self, chat_id: str, command: str, session_key: str,
-        description: str = "dangerous command",
-        metadata: Optional[dict] = None,
-    ) -> SendResult:
-        """
-        Send a button-based exec approval prompt for a dangerous command.
-
-        The buttons call ``resolve_gateway_approval()`` to unblock the waiting
-        agent thread — this replaces the text-based ``/approve`` flow on Discord.
-        """
-        if not self._client or not DISCORD_AVAILABLE:
-            return SendResult(success=False, error="Not connected")
-
-        try:
-            # Resolve channel — use thread_id from metadata if present
-            target_id = chat_id
-            if metadata and metadata.get("thread_id"):
-                target_id = metadata["thread_id"]
-
-            channel = self._client.get_channel(int(target_id))
-            if not channel:
-                channel = await self._client.fetch_channel(int(target_id))
-
-            # Discord embed description limit is 4096; show full command up to that
-            max_desc = 4088
-            cmd_display = command if len(command) <= max_desc else command[: max_desc - 3] + "..."
-            embed = discord.Embed(
-                title="⚠️ Command Approval Required",
-                description=f"```\n{cmd_display}\n```",
-                color=discord.Color.orange(),
-            )
-            embed.add_field(name="Reason", value=description, inline=False)
-
-            view = ExecApprovalView(
-                session_key=session_key,
-                allowed_user_ids=self._allowed_user_ids,
-            )
-
-            msg = await channel.send(embed=embed, view=view)
-            return SendResult(success=True, message_id=str(msg.id))
-
-        except Exception as e:
-            return SendResult(success=False, error=str(e))
-
     async def send_update_prompt(
         self, chat_id: str, prompt: str, default: str = "",
         session_key: str = "",
@@ -3096,100 +3050,6 @@ class DiscordAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 if DISCORD_AVAILABLE:
-
-    class ExecApprovalView(discord.ui.View):
-        """
-        Interactive button view for exec approval of dangerous commands.
-
-        Shows four buttons: Allow Once, Allow Session, Always Allow, Deny.
-        Clicking a button calls ``resolve_gateway_approval()`` to unblock the
-        waiting agent thread — the same mechanism as the text ``/approve`` flow.
-        Only users in the allowed list can click.  Times out after 5 minutes.
-        """
-
-        def __init__(self, session_key: str, allowed_user_ids: set):
-            super().__init__(timeout=300)  # 5-minute timeout
-            self.session_key = session_key
-            self.allowed_user_ids = allowed_user_ids
-            self.resolved = False
-
-        def _check_auth(self, interaction: discord.Interaction) -> bool:
-            """Verify the user clicking is authorized."""
-            if not self.allowed_user_ids:
-                return True  # No allowlist = anyone can approve
-            return str(interaction.user.id) in self.allowed_user_ids
-
-        async def _resolve(
-            self, interaction: discord.Interaction, choice: str,
-            color: discord.Color, label: str,
-        ):
-            """Resolve the approval via the gateway approval queue and update the embed."""
-            if self.resolved:
-                await interaction.response.send_message(
-                    "This approval has already been resolved~", ephemeral=True
-                )
-                return
-
-            if not self._check_auth(interaction):
-                await interaction.response.send_message(
-                    "You're not authorized to approve commands~", ephemeral=True
-                )
-                return
-
-            self.resolved = True
-
-            # Update the embed with the decision
-            embed = interaction.message.embeds[0] if interaction.message.embeds else None
-            if embed:
-                embed.color = color
-                embed.set_footer(text=f"{label} by {interaction.user.display_name}")
-
-            # Disable all buttons
-            for child in self.children:
-                child.disabled = True
-
-            await interaction.response.edit_message(embed=embed, view=self)
-
-            # Unblock the waiting agent thread via the gateway approval queue
-            try:
-                from tools.approval import resolve_gateway_approval
-                count = resolve_gateway_approval(self.session_key, choice)
-                logger.info(
-                    "Discord button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                    count, self.session_key, choice, interaction.user.display_name,
-                )
-            except Exception as exc:
-                logger.error("Failed to resolve gateway approval from button: %s", exc)
-
-        @discord.ui.button(label="Allow Once", style=discord.ButtonStyle.green)
-        async def allow_once(
-            self, interaction: discord.Interaction, button: discord.ui.Button
-        ):
-            await self._resolve(interaction, "once", discord.Color.green(), "Approved once")
-
-        @discord.ui.button(label="Allow Session", style=discord.ButtonStyle.grey)
-        async def allow_session(
-            self, interaction: discord.Interaction, button: discord.ui.Button
-        ):
-            await self._resolve(interaction, "session", discord.Color.blue(), "Approved for session")
-
-        @discord.ui.button(label="Always Allow", style=discord.ButtonStyle.blurple)
-        async def allow_always(
-            self, interaction: discord.Interaction, button: discord.ui.Button
-        ):
-            await self._resolve(interaction, "always", discord.Color.purple(), "Approved permanently")
-
-        @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
-        async def deny(
-            self, interaction: discord.Interaction, button: discord.ui.Button
-        ):
-            await self._resolve(interaction, "deny", discord.Color.red(), "Denied")
-
-        async def on_timeout(self):
-            """Handle view timeout -- disable buttons and mark as expired."""
-            self.resolved = True
-            for child in self.children:
-                child.disabled = True
 
     class UpdatePromptView(discord.ui.View):
         """Interactive Yes/No buttons for ``hermes update`` prompts.

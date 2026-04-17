@@ -115,8 +115,7 @@ class TestForegroundTimeoutCap:
             with patch("tools.terminal_tool._active_environments", {"default": mock_env}), \
                  patch("tools.terminal_tool._last_activity", {"default": 0}), \
                  patch("tools.terminal_tool._check_all_guards", return_value={"approved": True}), \
-                 patch("tools.process_registry.process_registry", mock_registry), \
-                 patch("tools.approval.get_current_session_key", return_value=""):
+                 patch("tools.process_registry.process_registry", mock_registry):
                 result = json.loads(terminal_tool(
                     command="python server.py",
                     background=True,

@@ -498,12 +498,6 @@ def load_cli_config() -> Dict[str, Any]:
             "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
             "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
         },
-        "approval": {
-            "provider": "AUXILIARY_APPROVAL_PROVIDER",
-            "model": "AUXILIARY_APPROVAL_MODEL",
-            "base_url": "AUXILIARY_APPROVAL_BASE_URL",
-            "api_key": "AUXILIARY_APPROVAL_API_KEY",
-        },
     }
     
     for task_key, env_map in auxiliary_task_env.items():
@@ -598,7 +592,7 @@ from cron import get_job
 
 # Resource cleanup imports for safe shutdown (terminal VMs, browser sessions)
 from tools.terminal_tool import cleanup_all_environments as _cleanup_all_terminals
-from tools.terminal_tool import set_sudo_password_callback, set_approval_callback
+from tools.terminal_tool import set_sudo_password_callback
 from tools.skills_tool import set_secret_capture_callback
 from hermes_cli.callbacks import prompt_for_secret
 from tools.browser_tool import _emergency_cleanup_all_sessions as _cleanup_all_browsers
@@ -1830,9 +1824,6 @@ class HermesCLI:
         self._sudo_state = None
         self._sudo_deadline = 0
         self._modal_input_snapshot = None
-        self._approval_state = None
-        self._approval_deadline = 0
-        self._approval_lock = threading.Lock()
         self._model_picker_state = None
         self._secret_state = None
         self._secret_deadline = 0
@@ -4526,7 +4517,7 @@ class HermesCLI:
     ) -> tuple[int, int]:
         """Resolve (scroll_offset, visible) for the /model picker viewport.
 
-        ``reserved_below`` matches the approval / clarify panels — input area,
+        ``reserved_below`` matches the clarify panel — input area,
         status bar, and separators below the panel. ``panel_chrome`` covers
         this panel's own borders + blanks + hint row. The remaining rows hold
         the scrollable list, with the offset slid to keep ``selected`` on screen.
@@ -5541,8 +5532,6 @@ class HermesCLI:
             self.console.print(f"  Status bar {state}")
         elif canonical == "verbose":
             self._toggle_verbose()
-        elif canonical == "yolo":
-            self._toggle_yolo()
         elif canonical == "reasoning":
             self._handle_reasoning_command(cmd_original)
         elif canonical == "fast":
@@ -6292,25 +6281,6 @@ class HermesCLI:
             "verbose": f"{_Colors.BOLD}{_Colors.GREEN}Tool progress: VERBOSE{_Colors.RESET} — full args, results, think blocks, and debug logs.",
         }
         _cprint(labels.get(self.tool_progress_mode, ""))
-
-    def _toggle_yolo(self):
-        """Toggle YOLO mode — skip all dangerous command approval prompts."""
-        import os
-        from hermes_cli.colors import Colors as _Colors
-
-        current = bool(os.environ.get("HERMES_YOLO_MODE"))
-        if current:
-            os.environ.pop("HERMES_YOLO_MODE", None)
-            _cprint(
-                f"  ⚠ YOLO mode {_Colors.BOLD}{_Colors.RED}OFF{_Colors.RESET}"
-                " — dangerous commands will require approval."
-            )
-        else:
-            os.environ["HERMES_YOLO_MODE"] = "1"
-            _cprint(
-                f"  ⚡ YOLO mode {_Colors.BOLD}{_Colors.GREEN}ON{_Colors.RESET}"
-                " — all commands auto-approved. Use with caution."
-            )
 
     def _handle_reasoning_command(self, cmd: str):
         """Handle /reasoning — manage effort level and display toggle.
@@ -7400,276 +7370,6 @@ class HermesCLI:
         _cprint(f"\n{_DIM}  ⏱ Timeout — continuing without sudo{_RST}")
         return ""
 
-    def _approval_callback(self, command: str, description: str,
-                           *, allow_permanent: bool = True) -> str:
-        """
-        Prompt for dangerous command approval through the prompt_toolkit UI.
-
-        Called from the agent thread. Shows a selection UI similar to clarify
-        with choices: once / session / always / deny. When allow_permanent
-        is False (tirith warnings present), the 'always' option is hidden.
-        Long commands also get a 'view' option so the full command can be
-        expanded before deciding.
-
-        Uses _approval_lock to serialize concurrent requests (e.g. from
-        parallel delegation subtasks) so each prompt gets its own turn
-        and the shared _approval_state / _approval_deadline aren't clobbered.
-        """
-        import time as _time
-
-        with self._approval_lock:
-            timeout = 60
-            response_queue = queue.Queue()
-
-            self._approval_state = {
-                "command": command,
-                "description": description,
-                "choices": self._approval_choices(command, allow_permanent=allow_permanent),
-                "selected": 0,
-                "response_queue": response_queue,
-            }
-            self._approval_deadline = _time.monotonic() + timeout
-
-            self._invalidate()
-
-            _last_countdown_refresh = _time.monotonic()
-            while True:
-                try:
-                    result = response_queue.get(timeout=1)
-                    self._approval_state = None
-                    self._approval_deadline = 0
-                    self._invalidate()
-                    return result
-                except queue.Empty:
-                    remaining = self._approval_deadline - _time.monotonic()
-                    if remaining <= 0:
-                        break
-                    now = _time.monotonic()
-                    if now - _last_countdown_refresh >= 5.0:
-                        _last_countdown_refresh = now
-                        self._invalidate()
-
-            self._approval_state = None
-            self._approval_deadline = 0
-            self._invalidate()
-            _cprint(f"\n{_DIM}  ⏱ Timeout — denying command{_RST}")
-            return "deny"
-
-    def _approval_choices(self, command: str, *, allow_permanent: bool = True) -> list[str]:
-        """Return approval choices for a dangerous command prompt."""
-        choices = ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
-        if len(command) > 70:
-            choices.append("view")
-        return choices
-
-    def _handle_approval_selection(self) -> None:
-        """Process the currently selected dangerous-command approval choice."""
-        state = self._approval_state
-        if not state:
-            return
-
-        selected = state.get("selected", 0)
-        choices = state.get("choices") or []
-        if not (0 <= selected < len(choices)):
-            return
-
-        chosen = choices[selected]
-        if chosen == "view":
-            state["show_full"] = True
-            state["choices"] = [choice for choice in choices if choice != "view"]
-            if state["selected"] >= len(state["choices"]):
-                state["selected"] = max(0, len(state["choices"]) - 1)
-            self._invalidate()
-            return
-
-        state["response_queue"].put(chosen)
-        self._approval_state = None
-        self._invalidate()
-
-    def _get_approval_display_fragments(self):
-        """Render the dangerous-command approval panel for the prompt_toolkit UI.
-
-        Layout priority: title + command + choices must always render, even if
-        the terminal is short or the description is long. Description is placed
-        at the bottom of the panel and gets truncated to fit the remaining row
-        budget. This prevents HSplit from clipping approve/deny off-screen when
-        tirith findings produce multi-paragraph descriptions or when the user
-        runs in a compact terminal pane.
-        """
-        state = self._approval_state
-        if not state:
-            return []
-
-        def _panel_box_width(title_text: str, content_lines: list[str], min_width: int = 46, max_width: int = 76) -> int:
-            term_cols = shutil.get_terminal_size((100, 20)).columns
-            longest = max([len(title_text)] + [len(line) for line in content_lines] + [min_width - 4])
-            inner = min(max(longest + 4, min_width - 2), max_width - 2, max(24, term_cols - 6))
-            return inner + 2
-
-        def _wrap_panel_text(text: str, width: int, subsequent_indent: str = "") -> list[str]:
-            wrapped = textwrap.wrap(
-                text,
-                width=max(8, width),
-                replace_whitespace=False,
-                drop_whitespace=False,
-                subsequent_indent=subsequent_indent,
-            )
-            return wrapped or [""]
-
-        def _append_panel_line(lines, border_style: str, content_style: str, text: str, box_width: int) -> None:
-            inner_width = max(0, box_width - 2)
-            lines.append((border_style, "│ "))
-            lines.append((content_style, text.ljust(inner_width)))
-            lines.append((border_style, " │\n"))
-
-        def _append_blank_panel_line(lines, border_style: str, box_width: int) -> None:
-            lines.append((border_style, "│" + (" " * box_width) + "│\n"))
-
-        command = state["command"]
-        description = state["description"]
-        choices = state["choices"]
-        selected = state.get("selected", 0)
-        show_full = state.get("show_full", False)
-
-        title = "⚠️  Dangerous Command"
-        cmd_display = command if show_full or len(command) <= 70 else command[:70] + '...'
-        choice_labels = {
-            "once": "Allow once",
-            "session": "Allow for this session",
-            "always": "Add to permanent allowlist",
-            "deny": "Deny",
-            "view": "Show full command",
-        }
-
-        preview_lines = _wrap_panel_text(description, 60)
-        preview_lines.extend(_wrap_panel_text(cmd_display, 60))
-        for i, choice in enumerate(choices):
-            prefix = '❯ ' if i == selected else '  '
-            preview_lines.extend(_wrap_panel_text(
-                f"{prefix}{choice_labels.get(choice, choice)}",
-                60,
-                subsequent_indent="  ",
-            ))
-
-        box_width = _panel_box_width(title, preview_lines)
-        inner_text_width = max(8, box_width - 2)
-
-        # Pre-wrap the mandatory content — command + choices must always render.
-        cmd_wrapped = _wrap_panel_text(cmd_display, inner_text_width)
-
-        # (choice_index, wrapped_line) so we can re-apply selected styling below
-        choice_wrapped: list[tuple[int, str]] = []
-        for i, choice in enumerate(choices):
-            label = choice_labels.get(choice, choice)
-            prefix = '❯ ' if i == selected else '  '
-            for wrapped in _wrap_panel_text(f"{prefix}{label}", inner_text_width, subsequent_indent="  "):
-                choice_wrapped.append((i, wrapped))
-
-        # Budget vertical space so HSplit never clips the command or choices.
-        # Panel chrome (full layout with separators):
-        #   top border + title + blank_after_title
-        #   + blank_between_cmd_choices + bottom border = 5 rows.
-        # In tight terminals we collapse to:
-        #   top border + title + bottom border = 3 rows (no blanks).
-        #
-        # reserved_below: rows consumed below the approval panel by the
-        # spinner/tool-progress line, status bar, input area, separators, and
-        # prompt symbol. Measured at ~6 rows during live PTY approval prompts;
-        # budget 6 so we don't overestimate the panel's room.
-        term_rows = shutil.get_terminal_size((100, 24)).lines
-        chrome_full = 5
-        chrome_tight = 3
-        reserved_below = 6
-
-        available = max(0, term_rows - reserved_below)
-        mandatory_full = chrome_full + len(cmd_wrapped) + len(choice_wrapped)
-
-        # If the full-chrome panel doesn't fit, drop the separator blanks.
-        # This keeps the command and every choice on-screen in compact terminals.
-        use_compact_chrome = mandatory_full > available
-        chrome_rows = chrome_tight if use_compact_chrome else chrome_full
-
-        # If the command itself is too long to leave room for choices (e.g. user
-        # hit "view" on a multi-hundred-character command), truncate it so the
-        # approve/deny buttons still render. Keep at least 1 row of command.
-        max_cmd_rows = max(1, available - chrome_rows - len(choice_wrapped))
-        if len(cmd_wrapped) > max_cmd_rows:
-            keep = max(1, max_cmd_rows - 1) if max_cmd_rows > 1 else 1
-            cmd_wrapped = cmd_wrapped[:keep] + ["… (command truncated — use /logs or /debug for full text)"]
-
-        # Allocate any remaining rows to description. The extra -1 in full mode
-        # accounts for the blank separator between choices and description.
-        mandatory_no_desc = chrome_rows + len(cmd_wrapped) + len(choice_wrapped)
-        desc_sep_cost = 0 if use_compact_chrome else 1
-        available_for_desc = available - mandatory_no_desc - desc_sep_cost
-        # Even on huge terminals, cap description height so the panel stays compact.
-        available_for_desc = max(0, min(available_for_desc, 10))
-
-        desc_wrapped = _wrap_panel_text(description, inner_text_width) if description else []
-        if available_for_desc < 1 or not desc_wrapped:
-            desc_wrapped = []
-        elif len(desc_wrapped) > available_for_desc:
-            keep = max(1, available_for_desc - 1)
-            desc_wrapped = desc_wrapped[:keep] + ["… (description truncated)"]
-
-        # Render: title → command → choices → description (description last so
-        # any remaining overflow clips from the bottom of the least-critical
-        # content, never from the command or choices). Use compact chrome (no
-        # blank separators) when the terminal is tight.
-        lines = []
-        lines.append(('class:approval-border', '╭' + ('─' * box_width) + '╮\n'))
-        _append_panel_line(lines, 'class:approval-border', 'class:approval-title', title, box_width)
-        if not use_compact_chrome:
-            _append_blank_panel_line(lines, 'class:approval-border', box_width)
-
-        for wrapped in cmd_wrapped:
-            _append_panel_line(lines, 'class:approval-border', 'class:approval-cmd', wrapped, box_width)
-        if not use_compact_chrome:
-            _append_blank_panel_line(lines, 'class:approval-border', box_width)
-
-        for i, wrapped in choice_wrapped:
-            style = 'class:approval-selected' if i == selected else 'class:approval-choice'
-            _append_panel_line(lines, 'class:approval-border', style, wrapped, box_width)
-
-        if desc_wrapped:
-            if not use_compact_chrome:
-                _append_blank_panel_line(lines, 'class:approval-border', box_width)
-            for wrapped in desc_wrapped:
-                _append_panel_line(lines, 'class:approval-border', 'class:approval-desc', wrapped, box_width)
-
-        lines.append(('class:approval-border', '╰' + ('─' * box_width) + '╯\n'))
-        return lines
-
-    def _secret_capture_callback(self, var_name: str, prompt: str, metadata=None) -> dict:
-        return prompt_for_secret(self, var_name, prompt, metadata)
-
-    def _capture_modal_input_snapshot(self) -> None:
-        """Temporarily clear the input buffer and save the user's in-progress draft."""
-        if self._modal_input_snapshot is not None or not getattr(self, "_app", None):
-            return
-        try:
-            buf = self._app.current_buffer
-            self._modal_input_snapshot = {
-                "text": buf.text,
-                "cursor_position": buf.cursor_position,
-            }
-            buf.reset()
-        except Exception:
-            self._modal_input_snapshot = None
-
-    def _restore_modal_input_snapshot(self) -> None:
-        """Restore any draft text that was present before a modal prompt opened."""
-        snapshot = self._modal_input_snapshot
-        self._modal_input_snapshot = None
-        if not snapshot or not getattr(self, "_app", None):
-            return
-        try:
-            buf = self._app.current_buffer
-            buf.text = snapshot.get("text", "")
-            buf.cursor_position = min(snapshot.get("cursor_position", 0), len(buf.text))
-        except Exception:
-            pass
-
     def _submit_secret_response(self, value: str) -> None:
         if not self._secret_state:
             return
@@ -8206,7 +7906,7 @@ class HermesCLI:
         """Return ``(normal_prompt, state_suffix)`` for the active skin.
 
         ``normal_prompt`` is the full ``branding.prompt_symbol``.
-        ``state_suffix`` is what special states (sudo/secret/approval/agent)
+        ``state_suffix`` is what special states (sudo/secret/agent)
         should render after their leading icon.
 
         When a profile is active (not "default"), the profile name is
@@ -8277,8 +7977,6 @@ class HermesCLI:
             return _state_fragment("class:sudo-prompt", "🔐")
         if self._secret_state:
             return _state_fragment("class:sudo-prompt", "🔑")
-        if self._approval_state:
-            return _state_fragment("class:prompt-working", "⚠")
         if self._clarify_freetext:
             return _state_fragment("class:clarify-selected", "✎")
         if self._clarify_state:
@@ -8344,7 +8042,6 @@ class HermesCLI:
         *,
         sudo_widget,
         secret_widget,
-        approval_widget,
         clarify_widget,
         model_picker_widget=None,
         spinner_widget=None,
@@ -8368,7 +8065,6 @@ class HermesCLI:
                 Window(height=0),
                 sudo_widget,
                 secret_widget,
-                approval_widget,
                 clarify_widget,
                 model_picker_widget,
                 spinner_widget,
@@ -8466,11 +8162,6 @@ class HermesCLI:
         self._sudo_deadline = 0
         self._modal_input_snapshot = None
 
-        # Dangerous command approval state (similar mechanism to clarify)
-        self._approval_state = None     # dict with command, description, choices, selected, response_queue
-        self._approval_deadline = 0
-        self._approval_lock = threading.Lock()  # serialize concurrent approval prompts (delegation race fix)
-
         # Slash command loading state
         self._command_running = False
         self._command_status = ""
@@ -8496,23 +8187,7 @@ class HermesCLI:
 
         # Register callbacks so terminal_tool prompts route through our UI
         set_sudo_password_callback(self._sudo_password_callback)
-        set_approval_callback(self._approval_callback)
         set_secret_capture_callback(self._secret_capture_callback)
-
-        # Ensure tirith security scanner is available (downloads if needed).
-        # Warn the user if tirith is enabled in config but not available,
-        # so they know command security scanning is degraded.
-        try:
-            from tools.tirith_security import ensure_installed
-            tirith_path = ensure_installed(log_failures=False)
-            if tirith_path is None:
-                security_cfg = self.config.get("security", {}) or {}
-                tirith_enabled = security_cfg.get("tirith_enabled", True)
-                if tirith_enabled:
-                    _cprint(f"  {_DIM}⚠ tirith security scanner enabled but not available "
-                            f"— command scanning will use pattern matching only{_RST}")
-        except Exception:
-            pass  # Non-fatal — fail-open at scan time if unavailable
         
         # Key bindings for the input area
         kb = KeyBindings()
@@ -8523,7 +8198,6 @@ class HermesCLI:
             
             Routes to the correct queue based on active UI state:
             - Sudo password prompt: password goes to sudo response queue
-            - Approval selection: selected choice goes to approval response queue
             - Clarify freetext mode: answer goes to the clarify response queue
             - Clarify choice mode: selected choice goes to the clarify response queue
             - Agent running: goes to _interrupt_queue (chat() monitors this)
@@ -8544,12 +8218,6 @@ class HermesCLI:
                 text = event.app.current_buffer.text
                 self._submit_secret_response(text)
                 event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # --- Approval selection: confirm the highlighted choice ---
-            if self._approval_state:
-                self._handle_approval_selection()
                 event.app.invalidate()
                 return
 
@@ -8688,21 +8356,6 @@ class HermesCLI:
                 self._clarify_state["selected"] = min(max_idx, self._clarify_state["selected"] + 1)
                 event.app.invalidate()
 
-        # --- Dangerous command approval: arrow-key navigation ---
-
-        @kb.add('up', filter=Condition(lambda: bool(self._approval_state)))
-        def approval_up(event):
-            if self._approval_state:
-                self._approval_state["selected"] = max(0, self._approval_state["selected"] - 1)
-                event.app.invalidate()
-
-        @kb.add('down', filter=Condition(lambda: bool(self._approval_state)))
-        def approval_down(event):
-            if self._approval_state:
-                max_idx = len(self._approval_state["choices"]) - 1
-                self._approval_state["selected"] = min(max_idx, self._approval_state["selected"] + 1)
-                event.app.invalidate()
-
         # --- /model picker: arrow-key navigation ---
         @kb.add('up', filter=Condition(lambda: bool(self._model_picker_state)))
         def model_picker_up(event):
@@ -8734,7 +8387,7 @@ class HermesCLI:
         # Buffer.auto_up/auto_down handle both: cursor movement when multi-line,
         # history browsing when on the first/last line (or single-line input).
         _normal_input = Condition(
-            lambda: not self._clarify_state and not self._approval_state and not self._sudo_state and not self._secret_state and not self._model_picker_state
+            lambda: not self._clarify_state and not self._sudo_state and not self._secret_state and not self._model_picker_state
         )
 
         @kb.add('up', filter=_normal_input)
@@ -8753,7 +8406,7 @@ class HermesCLI:
             
             Priority:
             0. Cancel active voice recording
-            1. Cancel active sudo/approval/clarify prompt
+            1. Cancel active sudo/clarify prompt
             2. Interrupt the running agent (first press)
             3. Force exit (second press within 2s, or when idle)
             """
@@ -8790,13 +8443,6 @@ class HermesCLI:
             if self._secret_state:
                 self._cancel_secret_capture()
                 event.app.current_buffer.reset()
-                event.app.invalidate()
-                return
-
-            # Cancel approval prompt (deny)
-            if self._approval_state:
-                self._approval_state["response_queue"].put("deny")
-                self._approval_state = None
                 event.app.invalidate()
                 return
 
@@ -8916,7 +8562,7 @@ class HermesCLI:
                 # Guard: don't START recording during agent run or interactive prompts
                 if cli_ref._agent_running:
                     return
-                if cli_ref._clarify_state or cli_ref._sudo_state or cli_ref._approval_state:
+                if cli_ref._clarify_state or cli_ref._sudo_state:
                     return
                 # Guard: don't start while a previous stop/transcribe cycle is
                 # still running — recorder.stop() holds AudioRecorder._lock and
@@ -9163,8 +8809,6 @@ class HermesCLI:
                 return "type password (hidden), Enter to submit · ESC to skip"
             if cli_ref._secret_state:
                 return "type secret (hidden), Enter to submit · ESC to skip"
-            if cli_ref._approval_state:
-                return ""
             if cli_ref._clarify_freetext:
                 return "type your answer here and press Enter"
             if cli_ref._clarify_state:
@@ -9182,7 +8826,7 @@ class HermesCLI:
         input_area.control.input_processors.append(_PlaceholderProcessor(_get_placeholder))
 
         # Hint line above input: shown only for interactive prompts that need
-        # extra instructions (sudo countdown, approval navigation, clarify).
+        # extra instructions (sudo countdown, clarify).
         # The agent-running interrupt hint is now an inline placeholder above.
         def get_hint_text():
             import time as _time
@@ -9198,13 +8842,6 @@ class HermesCLI:
                 remaining = max(0, int(cli_ref._secret_deadline - _time.monotonic()))
                 return [
                     ('class:hint', '  secret hidden · Enter to skip'),
-                    ('class:clarify-countdown', f'  ({remaining}s)'),
-                ]
-
-            if cli_ref._approval_state:
-                remaining = max(0, int(cli_ref._approval_deadline - _time.monotonic()))
-                return [
-                    ('class:hint', '  ↑/↓ to select, Enter to confirm'),
                     ('class:clarify-countdown', f'  ({remaining}s)'),
                 ]
 
@@ -9230,7 +8867,7 @@ class HermesCLI:
             return []
 
         def get_hint_height():
-            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._approval_state or cli_ref._clarify_state or cli_ref._command_running:
+            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._clarify_state or cli_ref._command_running:
                 return 1
             # Keep a spacer while the agent runs on roomy terminals, but reclaim
             # the row on narrow/mobile screens where every line matters.
@@ -9354,7 +8991,7 @@ class HermesCLI:
             #          + blank_before_bottom + bottom border = 5 rows
             #   tight: top border + bottom border = 2 rows (drop all blanks)
             #
-            # reserved_below matches the approval-panel budget (~6 rows for
+            # reserved_below matches the clarify-panel budget (~6 rows for
             # spinner/tool-progress + status + input + separators + prompt).
             term_rows = shutil.get_terminal_size((100, 24)).lines
             chrome_full = 5
@@ -9486,19 +9123,6 @@ class HermesCLI:
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._secret_state is not None),
-        )
-
-        # --- Dangerous command approval: display widget ---
-
-        def _get_approval_display():
-            return cli_ref._get_approval_display_fragments()
-
-        approval_widget = ConditionalContainer(
-            Window(
-                FormattedTextControl(_get_approval_display),
-                wrap_lines=True,
-            ),
-            filter=Condition(lambda: cli_ref._approval_state is not None),
         )
 
         # --- /model picker: display widget ---
@@ -9635,7 +9259,7 @@ class HermesCLI:
         self._register_extra_tui_keybindings(kb, input_area=input_area)
 
         # Layout: interactive prompt widgets + ruled input at bottom.
-        # The sudo, approval, and clarify widgets appear above the input when
+        # The sudo and clarify widgets appear above the input when
         # the corresponding interactive prompt is active.
         completions_menu = CompletionsMenu(max_height=12, scroll_offset=1)
 
@@ -9644,7 +9268,6 @@ class HermesCLI:
                 self._build_tui_layout_children(
                     sudo_widget=sudo_widget,
                     secret_widget=secret_widget,
-                    approval_widget=approval_widget,
                     clarify_widget=clarify_widget,
                     model_picker_widget=model_picker_widget,
                     spinner_widget=spinner_widget,
@@ -9696,13 +9319,6 @@ class HermesCLI:
             'sudo-border': '#CD7F32',
             'sudo-title': '#FF6B6B bold',
             'sudo-text': '#FFF8DC',
-            # Dangerous command approval panel
-            'approval-border': '#CD7F32',
-            'approval-title': '#FF8C00 bold',
-            'approval-desc': '#FFF8DC bold',
-            'approval-cmd': '#AAAAAA italic',
-            'approval-choice': '#AAAAAA',
-            'approval-selected': '#FFD700 bold',
             # Voice mode
             'voice-prompt': '#87CEEB',
             'voice-recording': '#FF4444 bold',
@@ -10059,7 +9675,6 @@ class HermesCLI:
                 pass
             # Unregister callbacks to avoid dangling references
             set_sudo_password_callback(None)
-            set_approval_callback(None)
             set_secret_capture_callback(None)
             # Close session in SQLite
             if hasattr(self, '_session_db') and self._session_db and self.agent:

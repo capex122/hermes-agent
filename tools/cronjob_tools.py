@@ -476,7 +476,6 @@ def check_cronjob_requirements() -> bool:
     return bool(
         os.getenv("HERMES_INTERACTIVE")
         or os.getenv("HERMES_GATEWAY_SESSION")
-        or os.getenv("HERMES_EXEC_ASK")
     )
 
 

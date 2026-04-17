@@ -516,13 +516,6 @@ DEFAULT_CONFIG = {
             "api_key": "",
             "timeout": 30,
         },
-        "approval": {
-            "provider": "auto",
-            "model": "",           # fast/cheap model recommended (e.g. gemini-flash, haiku)
-            "base_url": "",
-            "api_key": "",
-            "timeout": 30,
-        },
         "mcp": {
             "provider": "auto",
             "model": "",
@@ -722,17 +715,6 @@ DEFAULT_CONFIG = {
         "channel_prompts": {},         # Per-channel ephemeral system prompts
     },
 
-    # Approval mode for dangerous commands:
-    #   manual — always prompt the user (default)
-    #   smart  — use auxiliary LLM to auto-approve low-risk commands, prompt for high-risk
-    #   off    — skip all approval prompts (equivalent to --yolo)
-    "approvals": {
-        "mode": "manual",
-        "timeout": 60,
-    },
-
-    # Permanently allowed dangerous command patterns (added via "always" approval)
-    "command_allowlist": [],
     # User-defined quick commands that bypass the agent loop (type: exec only)
     "quick_commands": {},
     # Custom personalities — add your own entries here
@@ -740,13 +722,9 @@ DEFAULT_CONFIG = {
     # Or dict format: {"name": {"description": "...", "system_prompt": "...", "tone": "...", "style": "..."}}
     "personalities": {},
 
-    # Pre-exec security scanning via tirith
+    # Pre-exec security scanning and secret redaction
     "security": {
         "redact_secrets": True,
-        "tirith_enabled": True,
-        "tirith_path": "tirith",
-        "tirith_timeout": 5,
-        "tirith_fail_open": True,
         "website_blocklist": {
             "enabled": False,
             "domains": [],
@@ -2722,16 +2700,9 @@ _SECURITY_COMMENT = """
 # ── Security ──────────────────────────────────────────────────────────
 # API keys, tokens, and passwords are redacted from tool output by default.
 # Set to false to see full values (useful for debugging auth issues).
-# tirith pre-exec scanning is enabled by default when the tirith binary
-# is available. Configure via security.tirith_* keys or env vars
-# (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
 #
 # security:
 #   redact_secrets: false
-#   tirith_enabled: true
-#   tirith_path: "tirith"
-#   tirith_timeout: 5
-#   tirith_fail_open: true
 """
 
 _FALLBACK_COMMENT = """

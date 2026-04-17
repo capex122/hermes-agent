@@ -288,7 +288,7 @@ TOOLSETS = {
     },
     
     "hermes-discord": {
-        "description": "Discord bot toolset - full access (terminal has safety checks via dangerous command approval)",
+        "description": "Discord bot toolset - full access",
         "tools": _HERMES_CORE_TOOLS,
         "includes": []
     },

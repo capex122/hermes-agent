@@ -93,9 +93,6 @@ class SlackAdapter(BasePlatformAdapter):
         # Dedup cache: prevents duplicate bot responses when Socket Mode
         # reconnects redeliver events.
         self._dedup = MessageDeduplicator()
-        # Track pending approval message_ts → resolved flag to prevent
-        # double-clicks on approval buttons.
-        self._approval_resolved: Dict[str, bool] = {}
         # Track timestamps of messages sent by the bot so we can respond
         # to thread replies even without an explicit @mention.
         self._bot_message_ts: set = set()
@@ -204,15 +201,6 @@ class SlackAdapter(BasePlatformAdapter):
             async def handle_hermes_command(ack, command):
                 await ack()
                 await self._handle_slash_command(command)
-
-            # Register Block Kit action handlers for approval buttons
-            for _action_id in (
-                "hermes_approve_once",
-                "hermes_approve_session",
-                "hermes_approve_always",
-                "hermes_deny",
-            ):
-                self._app.action(_action_id)(self._handle_approval_action)
 
             # Start Socket Mode handler in background
             self._handler = AsyncSocketModeHandler(self._app, app_token)
@@ -1216,183 +1204,6 @@ class SlackAdapter(BasePlatformAdapter):
         if _should_react:
             await self._remove_reaction(channel_id, ts, "eyes")
             await self._add_reaction(channel_id, ts, "white_check_mark")
-
-    # ----- Approval button support (Block Kit) -----
-
-    async def send_exec_approval(
-        self, chat_id: str, command: str, session_key: str,
-        description: str = "dangerous command",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
-        """Send a Block Kit approval prompt with interactive buttons.
-
-        The buttons call ``resolve_gateway_approval()`` to unblock the waiting
-        agent thread — same mechanism as the text ``/approve`` flow.
-        """
-        if not self._app:
-            return SendResult(success=False, error="Not connected")
-
-        try:
-            cmd_preview = command[:2900] + "..." if len(command) > 2900 else command
-            thread_ts = self._resolve_thread_ts(None, metadata)
-
-            blocks = [
-                {
-                    "type": "section",
-                    "text": {
-                        "type": "mrkdwn",
-                        "text": (
-                            f":warning: *Command Approval Required*\n"
-                            f"```{cmd_preview}```\n"
-                            f"Reason: {description}"
-                        ),
-                    },
-                },
-                {
-                    "type": "actions",
-                    "elements": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Allow Once"},
-                            "style": "primary",
-                            "action_id": "hermes_approve_once",
-                            "value": session_key,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Allow Session"},
-                            "action_id": "hermes_approve_session",
-                            "value": session_key,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Always Allow"},
-                            "action_id": "hermes_approve_always",
-                            "value": session_key,
-                        },
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "text": "Deny"},
-                            "style": "danger",
-                            "action_id": "hermes_deny",
-                            "value": session_key,
-                        },
-                    ],
-                },
-            ]
-
-            kwargs: Dict[str, Any] = {
-                "channel": chat_id,
-                "text": f"⚠️ Command approval required: {cmd_preview[:100]}",
-                "blocks": blocks,
-            }
-            if thread_ts:
-                kwargs["thread_ts"] = thread_ts
-
-            result = await self._get_client(chat_id).chat_postMessage(**kwargs)
-            msg_ts = result.get("ts", "")
-            if msg_ts:
-                self._approval_resolved[msg_ts] = False
-
-            return SendResult(success=True, message_id=msg_ts, raw_response=result)
-        except Exception as e:
-            logger.error("[Slack] send_exec_approval failed: %s", e, exc_info=True)
-            return SendResult(success=False, error=str(e))
-
-    async def _handle_approval_action(self, ack, body, action) -> None:
-        """Handle an approval button click from Block Kit."""
-        await ack()
-
-        action_id = action.get("action_id", "")
-        session_key = action.get("value", "")
-        message = body.get("message", {})
-        msg_ts = message.get("ts", "")
-        channel_id = body.get("channel", {}).get("id", "")
-        user_name = body.get("user", {}).get("name", "unknown")
-        user_id = body.get("user", {}).get("id", "")
-
-        # Only authorized users may click approval buttons.  Button clicks
-        # bypass the normal message auth flow in gateway/run.py, so we must
-        # check here as well.
-        allowed_csv = os.getenv("SLACK_ALLOWED_USERS", "").strip()
-        if allowed_csv:
-            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-            if "*" not in allowed_ids and user_id not in allowed_ids:
-                logger.warning(
-                    "[Slack] Unauthorized approval click by %s (%s) — ignoring",
-                    user_name, user_id,
-                )
-                return
-
-        # Map action_id to approval choice
-        choice_map = {
-            "hermes_approve_once": "once",
-            "hermes_approve_session": "session",
-            "hermes_approve_always": "always",
-            "hermes_deny": "deny",
-        }
-        choice = choice_map.get(action_id, "deny")
-
-        # Prevent double-clicks — atomic pop; first caller gets False, others get True (default)
-        if self._approval_resolved.pop(msg_ts, True):
-            return
-
-        # Update the message to show the decision and remove buttons
-        label_map = {
-            "once": f"✅ Approved once by {user_name}",
-            "session": f"✅ Approved for session by {user_name}",
-            "always": f"✅ Approved permanently by {user_name}",
-            "deny": f"❌ Denied by {user_name}",
-        }
-        decision_text = label_map.get(choice, f"Resolved by {user_name}")
-
-        # Get original text from the section block
-        original_text = ""
-        for block in message.get("blocks", []):
-            if block.get("type") == "section":
-                original_text = block.get("text", {}).get("text", "")
-                break
-
-        updated_blocks = [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": original_text or "Command approval request",
-                },
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": decision_text},
-                ],
-            },
-        ]
-
-        try:
-            await self._get_client(channel_id).chat_update(
-                channel=channel_id,
-                ts=msg_ts,
-                text=decision_text,
-                blocks=updated_blocks,
-            )
-        except Exception as e:
-            logger.warning("[Slack] Failed to update approval message: %s", e)
-
-        # Resolve the approval — this unblocks the agent thread
-        try:
-            from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(session_key, choice)
-            logger.info(
-                "Slack button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                count, session_key, choice, user_name,
-            )
-        except Exception as exc:
-            logger.error("Failed to resolve gateway approval from Slack button: %s", exc)
-
-        # (approval state already consumed by atomic pop above)
-
-    # ----- Thread context fetching -----
 
     async def _fetch_thread_context(
         self, channel_id: str, thread_ts: str, current_ts: str,

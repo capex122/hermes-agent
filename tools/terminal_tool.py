@@ -115,36 +115,13 @@ _cached_sudo_password: str = ""
 # instead of the default /dev/tty or input() readers. The CLI registers these
 # so prompts route through prompt_toolkit's event loop.
 #   _sudo_password_callback() -> str  (return password or "" to skip)
-#   _approval_callback(command, description) -> str  ("once"/"session"/"always"/"deny")
 _sudo_password_callback = None
-_approval_callback = None
 
 
 def set_sudo_password_callback(cb):
     """Register a callback for sudo password prompts (used by CLI)."""
     global _sudo_password_callback
     _sudo_password_callback = cb
-
-
-def set_approval_callback(cb):
-    """Register a callback for dangerous command approval prompts (used by CLI)."""
-    global _approval_callback
-    _approval_callback = cb
-
-# =============================================================================
-# Dangerous Command Approval System
-# =============================================================================
-
-# Dangerous command detection + approval now consolidated in tools/approval.py
-from tools.approval import (
-    check_all_command_guards as _check_all_guards_impl,
-)
-
-
-def _check_all_guards(command: str, env_type: str) -> dict:
-    """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
-    return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_approval_callback)
 
 
 # Allowlist: characters that can legitimately appear in directory paths.
@@ -1283,43 +1260,6 @@ def terminal_tool(
                         env = new_env
                     logger.info("%s environment ready for task %s", env_type, effective_task_id[:8])
 
-        # Pre-exec security checks (tirith + dangerous command detection)
-        # Skip check if force=True (user has confirmed they want to run it)
-        approval_note = None
-        if not force:
-            approval = _check_all_guards(command, env_type)
-            if not approval["approved"]:
-                # Check if this is an approval_required (gateway ask mode)
-                if approval.get("status") == "approval_required":
-                    return json.dumps({
-                        "output": "",
-                        "exit_code": -1,
-                        "error": approval.get("message", "Waiting for user approval"),
-                        "status": "approval_required",
-                        "command": approval.get("command", command),
-                        "description": approval.get("description", "command flagged"),
-                        "pattern_key": approval.get("pattern_key", ""),
-                    }, ensure_ascii=False)
-                # Command was blocked
-                desc = approval.get("description", "command flagged")
-                fallback_msg = (
-                    f"Command denied: {desc}. "
-                    "Use the approval prompt to allow it, or rephrase the command."
-                )
-                return json.dumps({
-                    "output": "",
-                    "exit_code": -1,
-                    "error": approval.get("message", fallback_msg),
-                    "status": "blocked"
-                }, ensure_ascii=False)
-            # Track whether approval was explicitly granted by the user
-            if approval.get("user_approved"):
-                desc = approval.get("description", "flagged as dangerous")
-                approval_note = f"Command required approval ({desc}) and was approved by the user."
-            elif approval.get("smart_approved"):
-                desc = approval.get("description", "flagged as dangerous")
-                approval_note = f"Command was flagged ({desc}) and auto-approved by smart approval."
-
         # Validate workdir against shell injection
         if workdir:
             workdir_error = _validate_workdir(workdir)
@@ -1349,10 +1289,9 @@ def terminal_tool(
             # Spawn a tracked background process via the process registry.
             # For local backends: uses subprocess.Popen with output buffering.
             # For non-local backends: runs inside the sandbox via env.execute().
-            from tools.approval import get_current_session_key
             from tools.process_registry import process_registry
 
-            session_key = get_current_session_key(default="")
+            session_key = ""
             effective_cwd = workdir or cwd
             try:
                 if env_type == "local":
@@ -1380,8 +1319,6 @@ def terminal_tool(
                     "exit_code": 0,
                     "error": None,
                 }
-                if approval_note:
-                    result_data["approval"] = approval_note
                 if pty_disabled_reason:
                     result_data["pty_note"] = pty_disabled_reason
 
@@ -1514,8 +1451,6 @@ def terminal_tool(
                 "exit_code": returncode,
                 "error": None,
             }
-            if approval_note:
-                result_dict["approval"] = approval_note
             if exit_note:
                 result_dict["exit_code_meaning"] = exit_note
 

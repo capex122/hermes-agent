@@ -174,18 +174,6 @@ _FEISHU_WEBHOOK_ANOMALY_THRESHOLD = 25             # consecutive error responses
 _FEISHU_WEBHOOK_ANOMALY_TTL_SECONDS = 6 * 60 * 60  # anomaly tracker TTL (6 hours) — matches openclaw
 _FEISHU_CARD_ACTION_DEDUP_TTL_SECONDS = 15 * 60    # card action token dedup window (15 min)
 
-_APPROVAL_CHOICE_MAP: Dict[str, str] = {
-    "approve_once": "once",
-    "approve_session": "session",
-    "approve_always": "always",
-    "deny": "deny",
-}
-_APPROVAL_LABEL_MAP: Dict[str, str] = {
-    "once": "Approved once",
-    "session": "Approved for session",
-    "always": "Approved permanently",
-    "deny": "Denied",
-}
 _FEISHU_BOT_MSG_TRACK_SIZE = 512                   # LRU size for tracking sent message IDs
 _FEISHU_REPLY_FALLBACK_CODES = frozenset({230011, 231003})  # reply target withdrawn/missing → create fallback
 _FEISHU_ACK_EMOJI = "OK"
@@ -1093,9 +1081,6 @@ class FeishuAdapter(BasePlatformAdapter):
         self._media_batch_state = FeishuBatchState()
         self._pending_media_batches = self._media_batch_state.events
         self._pending_media_batch_tasks = self._media_batch_state.tasks
-        # Exec approval button state (approval_id → {session_key, message_id, chat_id})
-        self._approval_state: Dict[int, Dict[str, str]] = {}
-        self._approval_counter = itertools.count(1)
         self._load_seen_message_ids()
 
     @staticmethod
@@ -1445,96 +1430,6 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.error("[Feishu] Failed to edit message %s: %s", message_id, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
-
-    async def send_exec_approval(
-        self, chat_id: str, command: str, session_key: str,
-        description: str = "dangerous command",
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
-        """Send an interactive card with approval buttons.
-
-        The buttons carry ``hermes_action`` in their value dict so that
-        ``_handle_card_action_event`` can intercept them and call
-        ``resolve_gateway_approval()`` to unblock the waiting agent thread.
-        """
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-
-        try:
-            approval_id = next(self._approval_counter)
-            cmd_preview = command[:3000] + "..." if len(command) > 3000 else command
-
-            def _btn(label: str, action_name: str, btn_type: str = "default") -> dict:
-                return {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": label},
-                    "type": btn_type,
-                    "value": {"hermes_action": action_name, "approval_id": approval_id},
-                }
-
-            card = {
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "title": {"content": "⚠️ Command Approval Required", "tag": "plain_text"},
-                    "template": "orange",
-                },
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": f"```\n{cmd_preview}\n```\n**Reason:** {description}",
-                    },
-                    {
-                        "tag": "action",
-                        "actions": [
-                            _btn("✅ Allow Once", "approve_once", "primary"),
-                            _btn("✅ Session", "approve_session"),
-                            _btn("✅ Always", "approve_always"),
-                            _btn("❌ Deny", "deny", "danger"),
-                        ],
-                    },
-                ],
-            }
-
-            payload = json.dumps(card, ensure_ascii=False)
-            response = await self._feishu_send_with_retry(
-                chat_id=chat_id,
-                msg_type="interactive",
-                payload=payload,
-                reply_to=None,
-                metadata=metadata,
-            )
-
-            result = self._finalize_send_result(response, "send_exec_approval failed")
-            if result.success:
-                self._approval_state[approval_id] = {
-                    "session_key": session_key,
-                    "message_id": result.message_id or "",
-                    "chat_id": chat_id,
-                }
-            return result
-        except Exception as exc:
-            logger.warning("[Feishu] send_exec_approval failed: %s", exc)
-            return SendResult(success=False, error=str(exc))
-
-    @staticmethod
-    def _build_resolved_approval_card(*, choice: str, user_name: str) -> Dict[str, Any]:
-        """Build raw card JSON for a resolved approval action."""
-        icon = "❌" if choice == "deny" else "✅"
-        label = _APPROVAL_LABEL_MAP.get(choice, "Resolved")
-        return {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"content": f"{icon} {label}", "tag": "plain_text"},
-                "template": "red" if choice == "deny" else "green",
-            },
-            "elements": [
-                {
-                    "tag": "markdown",
-                    "content": f"{icon} **{label}** by {user_name}",
-                },
-            ],
-        }
-
     async def send_voice(
         self,
         chat_id: str,
@@ -2000,11 +1895,7 @@ class FeishuAdapter(BasePlatformAdapter):
     def _on_card_action_trigger(self, data: Any) -> Any:
         """Handle card-action callback from the Feishu SDK (synchronous).
 
-        For approval actions: parses the event once, returns the resolved card
-        inline (the only reliable way to sync all clients), and schedules a
-        lightweight async method to actually unblock the agent.
-
-        For other card actions: delegates to ``_handle_card_action_event``.
+        Delegates to ``_handle_card_action_event``.
         """
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
@@ -2014,11 +1905,6 @@ class FeishuAdapter(BasePlatformAdapter):
         event = getattr(data, "event", None)
         action = getattr(event, "action", None)
         action_value = getattr(action, "value", {}) or {}
-        hermes_action = action_value.get("hermes_action") if isinstance(action_value, dict) else None
-
-        if hermes_action:
-            return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
-
         self._submit_on_loop(loop, self._handle_card_action_event(data))
         if P2CardActionTriggerResponse is None:
             return None
@@ -2033,46 +1919,6 @@ class FeishuAdapter(BasePlatformAdapter):
         """Schedule background work on the adapter loop with shared failure logging."""
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         future.add_done_callback(self._log_background_failure)
-
-    def _handle_approval_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
-        """Schedule approval resolution and build the synchronous callback response."""
-        approval_id = action_value.get("approval_id")
-        if approval_id is None:
-            logger.debug("[Feishu] Card action missing approval_id, ignoring")
-            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
-        choice = _APPROVAL_CHOICE_MAP.get(action_value.get("hermes_action"), "deny")
-
-        operator = getattr(event, "operator", None)
-        open_id = str(getattr(operator, "open_id", "") or "")
-        user_name = self._get_cached_sender_name(open_id) or open_id
-
-        self._submit_on_loop(loop, self._resolve_approval(approval_id, choice, user_name))
-
-        if P2CardActionTriggerResponse is None:
-            return None
-        response = P2CardActionTriggerResponse()
-        if CallBackCard is not None:
-            card = CallBackCard()
-            card.type = "raw"
-            card.data = self._build_resolved_approval_card(choice=choice, user_name=user_name)
-            response.card = card
-        return response
-
-    async def _resolve_approval(self, approval_id: Any, choice: str, user_name: str) -> None:
-        """Pop approval state and unblock the waiting agent thread."""
-        state = self._approval_state.pop(approval_id, None)
-        if not state:
-            logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
-            return
-        try:
-            from tools.approval import resolve_gateway_approval
-            count = resolve_gateway_approval(state["session_key"], choice)
-            logger.info(
-                "Feishu button resolved %d approval(s) for session %s (choice=%s, user=%s)",
-                count, state["session_key"], choice, user_name,
-            )
-        except Exception as exc:
-            logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
 
     async def _handle_reaction_event(self, event_type: str, data: Any) -> None:
         """Fetch the reacted-to message; if it was sent by this bot, emit a synthetic text event."""

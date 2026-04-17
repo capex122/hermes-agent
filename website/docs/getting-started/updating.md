@@ -65,7 +65,7 @@ If `git status --short` shows unexpected changes after `hermes update`, stop and
 hermes version
 ```
 
-Compare against the latest release at the [GitHub releases page](https://github.com/NousResearch/hermes-agent/releases).
+Compare against the latest release at the [GitHub releases page](https://github.com/capex122/hermes-agent/releases).
 
 ### Updating from Messaging Platforms
 
