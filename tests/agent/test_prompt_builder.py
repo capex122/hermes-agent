@@ -1004,6 +1004,11 @@ class TestToolUseEnforcementGuidance:
         assert "cannot provide real-time information" in ACTION_EXECUTION_GUIDANCE
         assert "check a website/app" in ACTION_EXECUTION_GUIDANCE
 
+    def test_action_execution_guidance_allows_install_requests(self):
+        text = ACTION_EXECUTION_GUIDANCE.lower()
+        assert "cannot install software" in text
+        assert "terminal" in text
+
 
 class TestOpenAIModelExecutionGuidance:
     """Tests for GPT/Codex-specific execution discipline guidance."""
@@ -1064,6 +1069,12 @@ class TestOpenAIModelExecutionGuidance:
         )
         assert "use browser_search" in text
         assert "use browser_navigate with browser_snapshot" in text
+
+    def test_guidance_covers_user_requested_installs(self):
+        text = build_openai_model_execution_guidance({"terminal"})
+        assert "software, dependency, or browser/runtime installation" in text
+        assert "use terminal" in text
+        assert "Install Chromium headless and try again" in text
 
 
 class TestSearchIntentGuidance:
