@@ -18,6 +18,12 @@ def _reset_caches():
     bt._agent_browser_resolved = False
     bt._cached_command_timeout = None
     bt._command_timeout_resolved = False
+    bt._cached_cloud_provider = None
+    bt._cloud_provider_resolved = False
+    bt._cached_allow_private_urls = None
+    bt._allow_private_urls_resolved = False
+    bt._cached_prefer_stealth_for_antibot = None
+    bt._prefer_stealth_for_antibot_resolved = False
     bt._active_sessions.clear()
     bt._session_last_activity.clear()
     bt._proxy_reputation.clear()
@@ -137,6 +143,28 @@ class TestCommandTimeoutCache:
         with patch("hermes_cli.config.read_raw_config", mock_read):
             _get_command_timeout()
             _get_command_timeout()
+        mock_read.assert_called_once()
+
+
+class TestAntibotStealthPreferenceCache:
+
+    def test_default_enabled(self):
+        from tools.browser_tool import _prefer_stealth_for_antibot
+        with patch("hermes_cli.config.read_raw_config", return_value={}):
+            assert _prefer_stealth_for_antibot() is True
+
+    def test_reads_from_config(self):
+        from tools.browser_tool import _prefer_stealth_for_antibot
+        cfg = {"browser": {"prefer_stealth_for_antibot": False}}
+        with patch("hermes_cli.config.read_raw_config", return_value=cfg):
+            assert _prefer_stealth_for_antibot() is False
+
+    def test_cached_after_first_call(self):
+        from tools.browser_tool import _prefer_stealth_for_antibot
+        mock_read = MagicMock(return_value={"browser": {"prefer_stealth_for_antibot": False}})
+        with patch("hermes_cli.config.read_raw_config", mock_read):
+            _prefer_stealth_for_antibot()
+            _prefer_stealth_for_antibot()
         mock_read.assert_called_once()
 
 
@@ -495,6 +523,34 @@ class TestBotDetectionHandling:
         assert result["success"] is False
         assert result["discouraged_search_target"] is True
         assert "browser_search" in result["error"]
+
+    def test_navigate_prefers_browserbase_for_antibot_target_when_local_default(self):
+        import json
+        import tools.browser_tool as bt
+
+        provider = MagicMock()
+        with patch.object(bt, "_get_antibot_provider_override", return_value=provider), \
+             patch.object(bt, "_provider_registry_key", return_value="browserbase"), \
+             patch.object(bt, "_get_session_info", return_value={"_first_nav": False, "backend_kind": "browserbase"}) as mock_get_session, \
+             patch.object(bt, "_run_browser_command", return_value={"success": False, "error": "blocked"}) as mock_run:
+            result = json.loads(bt.browser_navigate("https://www.google.com/search?q=fire+pdf", task_id="test"))
+
+        assert result["success"] is False
+        assert mock_get_session.call_args.kwargs["provider_override"] is provider
+        assert mock_run.call_args.kwargs["provider_override"] is provider
+
+    def test_navigate_keeps_local_backend_when_antibot_override_disabled(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "_get_antibot_provider_override", return_value=None), \
+             patch.object(bt, "_get_session_info", return_value={"_first_nav": False, "backend_kind": "local"}) as mock_get_session, \
+             patch.object(bt, "_run_browser_command", return_value={"success": False, "error": "blocked"}) as mock_run:
+            result = json.loads(bt.browser_navigate("https://www.google.com/search?q=fire+pdf", task_id="test"))
+
+        assert result["success"] is False
+        assert mock_get_session.call_args.kwargs["provider_override"] is None
+        assert mock_run.call_args.kwargs["provider_override"] is None
 
     def test_browser_search_falls_back_to_bing_after_first_engine_failure(self):
         import json

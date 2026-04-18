@@ -23,6 +23,10 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import httpx
+try:
+    from selectolax.parser import HTMLParser
+except ImportError:  # pragma: no cover - fallback path for minimal installs
+    HTMLParser = None  # type: ignore[assignment]
 
 from tools.url_safety import is_safe_url
 from tools.webplus_service_manager import ensure_bundled_web_service
@@ -76,6 +80,49 @@ _RESULT_SNIPPET_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+_DDG_RESULT_CONTAINER_SELECTORS = (
+    "div.result",
+    "article.result",
+    "div.web-result",
+    "div.result.results_links",
+    "div.result.results_links_deep",
+)
+_DDG_RESULT_LINK_SELECTORS = (
+    "a.result__a",
+    "h2 a[href]",
+    "a[data-testid='result-title-a']",
+)
+_DDG_RESULT_SNIPPET_SELECTORS = (
+    ".result__snippet",
+    ".result-snippet",
+    "a.result__snippet",
+)
+_CONTENT_ROOT_SELECTORS = (
+    "main",
+    "article",
+    "[role='main']",
+    "#content",
+    ".content",
+    ".main-content",
+    "body",
+)
+_NOISE_SELECTORS = (
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "svg",
+    "canvas",
+    "iframe",
+)
+_LAYOUT_NOISE_SELECTORS = (
+    "header",
+    "nav",
+    "footer",
+    "aside",
+    "form",
+)
 
 
 def load_bundled_web_config() -> Dict[str, Any]:
@@ -147,6 +194,143 @@ def _clean_html_fragment(value: str) -> str:
     cleaned = re.sub(r"[ \t\f\v]+", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def _normalize_text_block(value: str) -> str:
+    text = html.unescape(value or "")
+    text = text.replace("\r", "")
+    text = re.sub(r"[ \t\f\v]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _parse_html_tree(html_text: str):
+    if not HTMLParser or not html_text:
+        return None
+    try:
+        return HTMLParser(html_text)
+    except Exception:
+        return None
+
+
+def _first_css(node: Any, selectors: tuple[str, ...]):
+    for selector in selectors:
+        try:
+            match = node.css_first(selector)
+        except Exception:
+            match = None
+        if match is not None:
+            return match
+    return None
+
+
+def _strip_noise_nodes(tree: Any, *, include_layout: bool) -> None:
+    selectors = list(_NOISE_SELECTORS)
+    if include_layout:
+        selectors.extend(_LAYOUT_NOISE_SELECTORS)
+    for selector in selectors:
+        try:
+            nodes = tree.css(selector)
+        except Exception:
+            nodes = []
+        for node in nodes:
+            try:
+                node.decompose()
+            except Exception:
+                continue
+
+
+def _select_content_root(tree: Any):
+    for selector in _CONTENT_ROOT_SELECTORS:
+        try:
+            node = tree.css_first(selector)
+        except Exception:
+            node = None
+        if node is not None:
+            return node
+    return getattr(tree, "body", None)
+
+
+def _extract_title_from_tree(tree: Any) -> str:
+    title_node = _first_css(tree, ("title", "meta[property='og:title']", "meta[name='twitter:title']"))
+    if title_node is None:
+        return ""
+    if getattr(title_node, "tag", "") == "meta":
+        return _normalize_text_block(title_node.attributes.get("content", ""))
+    return _normalize_text_block(title_node.text(strip=True))
+
+
+def _extract_text_from_tree(tree: Any) -> str:
+    root = _select_content_root(tree)
+    if root is None:
+        return ""
+    try:
+        text = root.text(separator="\n", strip=True)
+    except Exception:
+        text = ""
+    return _normalize_text_block(text)
+
+
+def _extract_ddg_results_with_parser(html_text: str, limit: int) -> List[Dict[str, Any]]:
+    tree = _parse_html_tree(html_text)
+    if tree is None:
+        return []
+
+    items: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    containers: list[Any] = []
+    seen_ids: set[int] = set()
+    for selector in _DDG_RESULT_CONTAINER_SELECTORS:
+        try:
+            matches = tree.css(selector)
+        except Exception:
+            matches = []
+        for node in matches:
+            node_id = id(node)
+            if node_id in seen_ids:
+                continue
+            seen_ids.add(node_id)
+            containers.append(node)
+
+    for container in containers:
+        anchor = _first_css(container, _DDG_RESULT_LINK_SELECTORS)
+        if anchor is None:
+            continue
+        href = _decode_duckduckgo_href(str(anchor.attributes.get("href", "")).strip())
+        title = _normalize_text_block(anchor.text(strip=True))
+        if not href or not title or href in seen_urls:
+            continue
+        snippet_node = _first_css(container, _DDG_RESULT_SNIPPET_SELECTORS)
+        description = ""
+        if snippet_node is not None:
+            description = _normalize_text_block(snippet_node.text(separator="\n", strip=True))
+        items.append({"title": title, "url": href, "description": description})
+        seen_urls.add(href)
+        if len(items) >= limit:
+            break
+
+    return items
+
+
+def _extract_html_title_and_text(html_text: str) -> tuple[str, str]:
+    tree = _parse_html_tree(html_text)
+    if tree is None:
+        return _extract_title(html_text), _clean_html_fragment(html_text)
+
+    _strip_noise_nodes(tree, include_layout=False)
+    title = _extract_title_from_tree(tree)
+    content = _extract_text_from_tree(tree)
+
+    if not content:
+        _strip_noise_nodes(tree, include_layout=True)
+        content = _extract_text_from_tree(tree)
+
+    if not title:
+        title = _extract_title(html_text)
+    if not content:
+        content = _clean_html_fragment(html_text)
+    return title, content
 
 
 def _extract_title(html_text: str) -> str:
@@ -275,6 +459,10 @@ def _duckduckgo_html_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     response.raise_for_status()
 
     html_text = response.text
+    parsed_items = _extract_ddg_results_with_parser(html_text, limit)
+    if parsed_items:
+        return parsed_items
+
     items: List[Dict[str, Any]] = []
     matches = list(_RESULT_LINK_RE.finditer(html_text))
     for idx, match in enumerate(matches[: limit * 2]):
@@ -526,8 +714,7 @@ async def local_web_extract(url: str, *, max_chars: Optional[int] = None) -> Dic
     title = ""
     content = ""
     if "html" in content_type:
-        title = _extract_title(response.text)
-        content = _clean_html_fragment(response.text)
+        title, content = _extract_html_title_and_text(response.text)
     elif "json" in content_type:
         try:
             parsed = response.json()

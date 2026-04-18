@@ -20,6 +20,7 @@ debugpy
 # Web tools
 firecrawl-py
 parallel-web>=0.4.2
+selectolax>=0.3.26,<1
 
 # Image generation
 fal-client

@@ -960,6 +960,8 @@ _cached_cloud_provider: Optional[CloudBrowserProvider] = None
 _cloud_provider_resolved = False
 _allow_private_urls_resolved = False
 _cached_allow_private_urls: Optional[bool] = None
+_prefer_stealth_for_antibot_resolved = False
+_cached_prefer_stealth_for_antibot: Optional[bool] = None
 _cached_agent_browser: Optional[str] = None
 _agent_browser_resolved = False
 
@@ -1067,6 +1069,25 @@ def _allow_private_urls() -> bool:
     except Exception as e:
         logger.debug("Could not read allow_private_urls from config: %s", e)
     return _cached_allow_private_urls
+
+
+def _prefer_stealth_for_antibot() -> bool:
+    """Return whether antibot-sensitive URLs should avoid local headless mode."""
+    global _cached_prefer_stealth_for_antibot, _prefer_stealth_for_antibot_resolved
+    if _prefer_stealth_for_antibot_resolved:
+        return _cached_prefer_stealth_for_antibot  # type: ignore[return-value]
+
+    _prefer_stealth_for_antibot_resolved = True
+    _cached_prefer_stealth_for_antibot = True
+    try:
+        from hermes_cli.config import read_raw_config
+        cfg = read_raw_config()
+        browser_cfg = cfg.get("browser", {})
+        if isinstance(browser_cfg, dict) and "prefer_stealth_for_antibot" in browser_cfg:
+            _cached_prefer_stealth_for_antibot = bool(browser_cfg.get("prefer_stealth_for_antibot"))
+    except Exception as e:
+        logger.debug("Could not read prefer_stealth_for_antibot from config: %s", e)
+    return _cached_prefer_stealth_for_antibot
 
 
 def _socket_safe_tmpdir() -> str:
@@ -1550,6 +1571,7 @@ def _create_local_session(task_id: str) -> Dict[str, Any]:
         "session_name": session_name,
         "bb_session_id": None,
         "cdp_url": None,
+        "backend_kind": "local",
         "features": {"local": True, "proxies": bool(proxy)},
     }
     _set_session_fingerprint_profile(session_info, fp_seed)
@@ -1570,11 +1592,15 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, Any]:
         "session_name": session_name,
         "bb_session_id": None,
         "cdp_url": cdp_url,
+        "backend_kind": "cdp",
         "features": {"cdp_override": True},
     }
 
 
-def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
+def _get_session_info(
+    task_id: Optional[str] = None,
+    provider_override: Optional[CloudBrowserProvider] = None,
+) -> Dict[str, Any]:
     """
     Get or create session info for the given task.
     
@@ -1608,7 +1634,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
     if cdp_override:
         session_info = _create_cdp_session(task_id, cdp_override)
     else:
-        provider = _get_cloud_provider()
+        provider = provider_override or _get_cloud_provider()
         if provider is None:
             session_info = _create_local_session(task_id)
         else:
@@ -1622,6 +1648,11 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
                     # CDP discovery URL instead of a raw websocket endpoint.
                     session_info = dict(session_info)
                     session_info["cdp_url"] = _resolve_cdp_override(str(session_info["cdp_url"]))
+                if isinstance(session_info, dict):
+                    provider_key = _provider_registry_key(provider)
+                    session_info = dict(session_info)
+                    session_info["backend_kind"] = provider_key
+                    session_info["cloud_provider_key"] = provider_key
             except Exception as e:
                 provider_name = type(provider).__name__
                 logger.warning(
@@ -1640,6 +1671,7 @@ def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
                 # Mark session as degraded for observability
                 if isinstance(session_info, dict):
                     session_info = dict(session_info)
+                    session_info["backend_kind"] = "local"
                     session_info["fallback_from_cloud"] = True
                     session_info["fallback_reason"] = str(e)
                     session_info["fallback_provider"] = provider_name
@@ -1765,6 +1797,7 @@ def _run_browser_command(
     command: str,
     args: List[str] = None,
     timeout: Optional[int] = None,
+    provider_override: Optional[CloudBrowserProvider] = None,
 ) -> Dict[str, Any]:
     """
     Run an agent-browser CLI command using our pre-created Browserbase session.
@@ -1801,7 +1834,7 @@ def _run_browser_command(
 
     # Get session info (creates Browserbase session with proxies if needed)
     try:
-        session_info = _get_session_info(task_id)
+        session_info = _get_session_info(task_id, provider_override=provider_override)
     except Exception as e:
         logger.warning("Failed to create browser session for task=%s: %s", task_id, e)
         return {"success": False, "error": f"Failed to create browser session: {str(e)}"}
@@ -2338,6 +2371,71 @@ def _google_search_guidance(url: str) -> str | None:
     return None
 
 
+def _collect_antibot_sensitive_hosts() -> tuple[str, ...]:
+    hosts: set[str] = set()
+    for _, template in (*_BROWSER_SEARCH_ENGINES, *_MULTI_SEARCH_ENGINES):
+        host = (_parse_browser_target_url(template.format(query="x")).hostname or "").lower()
+        if host:
+            hosts.add(host)
+    return tuple(sorted(hosts))
+
+
+_ANTIBOT_SENSITIVE_HOSTS = _collect_antibot_sensitive_hosts()
+
+
+def _is_antibot_sensitive_target(url: str) -> bool:
+    """Return True when the URL is likely to trigger headless browser defenses."""
+    parsed = _parse_browser_target_url(url)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if _MAIN_GOOGLE_HOST_RE.fullmatch(host):
+        return True
+    return any(host == candidate or host.endswith(f".{candidate}") for candidate in _ANTIBOT_SENSITIVE_HOSTS)
+
+
+def _provider_registry_key(provider: CloudBrowserProvider) -> str:
+    for key, provider_cls in _PROVIDER_REGISTRY.items():
+        if isinstance(provider, provider_cls):
+            return key
+    return provider.provider_name().strip().lower().replace(" ", "-")
+
+
+def _get_antibot_provider_override(url: str) -> Optional[CloudBrowserProvider]:
+    """Prefer Browserbase for antibot-sensitive URLs when Hermes would otherwise stay local."""
+    if not _prefer_stealth_for_antibot():
+        return None
+    if _get_cdp_override() or _is_camofox_mode():
+        return None
+    if not _is_antibot_sensitive_target(url):
+        return None
+    if _get_cloud_provider() is not None:
+        return None
+
+    provider = BrowserbaseProvider()
+    if provider.is_configured():
+        return provider
+    return None
+
+
+def _session_backend_kind(session_info: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(session_info, dict):
+        return "local"
+    backend_kind = str(session_info.get("backend_kind") or "").strip().lower()
+    if backend_kind:
+        return backend_kind
+    if session_info.get("cdp_url"):
+        provider_key = str(session_info.get("cloud_provider_key") or "").strip().lower()
+        return provider_key or "cdp"
+    return "local"
+
+
+def _effective_backend_is_local(provider_override: Optional[CloudBrowserProvider]) -> bool:
+    if provider_override is not None:
+        return False
+    return _is_local_backend()
+
+
 def _count_snapshot_links(snapshot_text: str) -> int:
     """Count snapshot link entries to distinguish result pages from landing pages."""
     if not snapshot_text:
@@ -2487,12 +2585,15 @@ def browser_navigate(
                      "Secrets must not be sent in URLs.",
         })
 
+    provider_override = _get_antibot_provider_override(url)
+    backend_is_local = _effective_backend_is_local(provider_override)
+
     # SSRF protection — block private/internal addresses before navigating.
     # Skipped for local backends (Camofox, headless Chromium without a cloud
     # provider) because the agent already has full local network access via
     # the terminal tool.  Can also be opted out for cloud mode via
     # ``browser.allow_private_urls`` in config.
-    if not _is_local_backend() and not _allow_private_urls() and not _is_safe_url(url):
+    if not backend_is_local and not _allow_private_urls() and not _is_safe_url(url):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL targets a private or internal address",
@@ -2522,10 +2623,16 @@ def browser_navigate(
         return camofox_navigate(url, task_id)
 
     effective_task_id = task_id or "default"
+
+    if provider_override is not None:
+        with _cleanup_lock:
+            existing_session = _active_sessions.get(effective_task_id)
+        if _session_backend_kind(existing_session) != _provider_registry_key(provider_override):
+            cleanup_browser(effective_task_id)
     
     # Get session info to check if this is a new session
     # (will create one with features logged if not exists)
-    session_info = _get_session_info(effective_task_id)
+    session_info = _get_session_info(effective_task_id, provider_override=provider_override)
     is_first_nav = session_info.get("_first_nav", True)
     
     # Auto-start recording if configured and this is first navigation
@@ -2533,7 +2640,13 @@ def browser_navigate(
         session_info["_first_nav"] = False
         _maybe_start_recording(effective_task_id)
     
-    result = _run_browser_command(effective_task_id, "open", [url], timeout=max(_get_command_timeout(), 60))
+    result = _run_browser_command(
+        effective_task_id,
+        "open",
+        [url],
+        timeout=max(_get_command_timeout(), 60),
+        provider_override=provider_override,
+    )
     
     if result.get("success"):
         data = result.get("data", {})
@@ -2544,7 +2657,7 @@ def browser_navigate(
         # private/internal address, block the result so the model can't read
         # internal content via subsequent browser_snapshot calls.
         # Skipped for local backends (same rationale as the pre-nav check).
-        if not _is_local_backend() and not _allow_private_urls() and final_url and final_url != url and not _is_safe_url(final_url):
+        if not backend_is_local and not _allow_private_urls() and final_url and final_url != url and not _is_safe_url(final_url):
             # Navigate away to a blank page to prevent snapshot leaks
             _run_browser_command(effective_task_id, "open", ["about:blank"], timeout=10)
             return json.dumps({
@@ -2568,6 +2681,8 @@ def browser_navigate(
                     "Consider upgrading Browserbase plan for proxy support."
                 )
             response["stealth_features"] = active_features
+            if provider_override is not None:
+                response["stealth_backend_override"] = _provider_registry_key(provider_override)
 
         # Apply a rotating stealth profile in local mode.
         _apply_local_stealth_profile(effective_task_id)
@@ -3687,7 +3802,8 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
         
         # Cloud mode: close the cloud browser session via provider API
         if bb_session_id:
-            provider = _get_cloud_provider()
+            provider_key = str(session_info.get("cloud_provider_key") or "").strip().lower()
+            provider = _PROVIDER_REGISTRY[provider_key]() if provider_key in _PROVIDER_REGISTRY else _get_cloud_provider()
             if provider is not None:
                 try:
                     provider.close_session(bb_session_id)
@@ -3729,11 +3845,20 @@ def cleanup_all_browsers() -> None:
     # Reset cached lookups so they are re-evaluated on next use.
     global _cached_agent_browser, _agent_browser_resolved
     global _cached_command_timeout, _command_timeout_resolved
+    global _cached_cloud_provider, _cloud_provider_resolved
+    global _cached_allow_private_urls, _allow_private_urls_resolved
+    global _cached_prefer_stealth_for_antibot, _prefer_stealth_for_antibot_resolved
     _cached_agent_browser = None
     _agent_browser_resolved = False
     _discover_homebrew_node_dirs.cache_clear()
     _cached_command_timeout = None
     _command_timeout_resolved = False
+    _cached_cloud_provider = None
+    _cloud_provider_resolved = False
+    _cached_allow_private_urls = None
+    _allow_private_urls_resolved = False
+    _cached_prefer_stealth_for_antibot = None
+    _prefer_stealth_for_antibot_resolved = False
 
 
 # ============================================================================

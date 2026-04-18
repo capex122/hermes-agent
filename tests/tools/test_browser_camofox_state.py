@@ -59,9 +59,15 @@ class TestCamofoxConfigDefaults:
         browser_cfg = DEFAULT_CONFIG["browser"]
         assert browser_cfg["camofox"]["managed_persistence"] is False
 
+    def test_default_config_includes_antibot_stealth_toggle(self):
+        from hermes_cli.config import DEFAULT_CONFIG
+
+        browser_cfg = DEFAULT_CONFIG["browser"]
+        assert browser_cfg["prefer_stealth_for_antibot"] is True
+
     def test_config_version_matches_current_schema(self):
         from hermes_cli.config import DEFAULT_CONFIG
 
         # The current schema version is tracked globally; unrelated default
         # options may bump it after browser defaults are added.
-        assert DEFAULT_CONFIG["_config_version"] == 18
+        assert DEFAULT_CONFIG["_config_version"] == 20
