@@ -35,6 +35,11 @@ Environment Variables:
   requires paid plan (default: "true")
 - BROWSERBASE_SESSION_TIMEOUT: Custom session timeout in milliseconds. Set to extend
   beyond project default. Common values: 600000 (10min), 1800000 (30min) (default: none)
+- HERMES_BROWSER_PROXY_POOL: Optional comma/newline-separated local Chromium proxy pool
+- HERMES_BROWSER_PROXY: Optional single local Chromium proxy endpoint
+- HERMES_BROWSER_PROXY_BYPASS: Optional Chromium proxy bypass list
+- HERMES_BROWSER_PROXY_QUARANTINE_SECONDS: Seconds to sideline a bad local proxy
+- HERMES_BROWSER_PROXY_FAILURE_THRESHOLD: Consecutive local proxy failures before quarantine
 
 Usage:
     from tools.browser_tool import browser_navigate, browser_snapshot, browser_click
@@ -343,9 +348,191 @@ _FINGERPRINT_POOL = [
 ]
 
 
+def _fingerprint_profile_from_seed(seed: int) -> tuple[str, str, str, int, int, str]:
+    """Return a deterministic fingerprint profile for the given seed."""
+    return _FINGERPRINT_POOL[seed % len(_FINGERPRINT_POOL)]
+
+
+def _choose_fingerprint_seed() -> int:
+    """Return a jittered seed for session-level fingerprint selection."""
+    return int(time.time() * 1000) + random.randint(0, 997)
+
+
+def _get_proxy_quarantine_seconds() -> int:
+    """Return how long bad local proxies should be sidelined."""
+    raw_value = os.environ.get("HERMES_BROWSER_PROXY_QUARANTINE_SECONDS", "1800")
+    try:
+        return max(60, min(int(raw_value), 86400))
+    except ValueError:
+        return 1800
+
+
+def _get_proxy_failure_threshold() -> int:
+    """Return how many consecutive local proxy failures trigger quarantine."""
+    raw_value = os.environ.get("HERMES_BROWSER_PROXY_FAILURE_THRESHOLD", "2")
+    try:
+        return max(1, min(int(raw_value), 5))
+    except ValueError:
+        return 2
+
+
+def _new_proxy_reputation_state() -> dict[str, Any]:
+    return {
+        "score": 0,
+        "successes": 0,
+        "failures": 0,
+        "consecutive_failures": 0,
+        "quarantined_until": 0.0,
+        "quarantine_count": 0,
+        "last_error": "",
+        "last_outcome": "",
+        "last_updated": 0.0,
+    }
+
+
+def _expire_proxy_quarantine_locked(proxy: str, now: float | None = None) -> None:
+    """Release expired quarantine state while holding _cleanup_lock."""
+    state = _proxy_reputation.get(proxy)
+    if not state:
+        return
+    current_time = time.time() if now is None else now
+    quarantined_until = float(state.get("quarantined_until") or 0.0)
+    if quarantined_until and quarantined_until <= current_time:
+        state["quarantined_until"] = 0.0
+        state["consecutive_failures"] = 0
+
+
+def _get_proxy_reputation_snapshot(proxy: str) -> dict[str, Any]:
+    """Return a copy of the current proxy reputation state."""
+    current_time = time.time()
+    with _cleanup_lock:
+        state = _proxy_reputation.setdefault(proxy, _new_proxy_reputation_state())
+        _expire_proxy_quarantine_locked(proxy, current_time)
+        return dict(state)
+
+
+def _record_proxy_outcome(proxy: Optional[str], outcome: str, *, reason: str = "") -> None:
+    """Track local proxy health so bad exits can be temporarily quarantined."""
+    proxy_value = (proxy or "").strip()
+    if not proxy_value:
+        return
+
+    current_time = time.time()
+    with _cleanup_lock:
+        state = _proxy_reputation.setdefault(proxy_value, _new_proxy_reputation_state())
+        _expire_proxy_quarantine_locked(proxy_value, current_time)
+
+        state["last_outcome"] = outcome
+        state["last_updated"] = current_time
+
+        if outcome == "success":
+            state["score"] = min(int(state.get("score", 0)) + 1, 6)
+            state["successes"] = int(state.get("successes", 0)) + 1
+            state["consecutive_failures"] = 0
+            state["quarantined_until"] = 0.0
+            state["last_error"] = ""
+            return
+
+        penalty = -3 if outcome == "bot_detection" else -1
+        state["score"] = max(int(state.get("score", 0)) + penalty, -12)
+        state["failures"] = int(state.get("failures", 0)) + 1
+        state["consecutive_failures"] = int(state.get("consecutive_failures", 0)) + 1
+        state["last_error"] = reason[:300] if reason else ""
+
+        should_quarantine = (
+            outcome == "bot_detection"
+            or state["consecutive_failures"] >= _get_proxy_failure_threshold()
+        )
+        if not should_quarantine:
+            return
+
+        already_quarantined = float(state.get("quarantined_until") or 0.0) > current_time
+        state["quarantined_until"] = max(
+            float(state.get("quarantined_until") or 0.0),
+            current_time + _get_proxy_quarantine_seconds(),
+        )
+        if not already_quarantined:
+            state["quarantine_count"] = int(state.get("quarantine_count", 0)) + 1
+
+
+def _record_session_proxy_outcome(
+    session_info: dict[str, Any] | None,
+    outcome: str,
+    *,
+    reason: str = "",
+) -> None:
+    """Record health for the proxy attached to this browser session."""
+    if not isinstance(session_info, dict):
+        return
+    _record_proxy_outcome(session_info.get("proxy"), outcome, reason=reason)
+
+
+def _choose_local_proxy() -> Optional[str]:
+    """Return one proxy endpoint from env config, or None when disabled.
+
+    Priority:
+    1) HERMES_BROWSER_PROXY_POOL (comma/newline separated list)
+    2) HERMES_BROWSER_PROXY (single endpoint)
+    """
+    raw_pool = os.environ.get("HERMES_BROWSER_PROXY_POOL", "")
+    pool = [item.strip() for item in re.split(r"[,\n]", raw_pool) if item.strip()]
+    if pool:
+        current_time = time.time()
+        healthy: list[tuple[str, int, int]] = []
+        quarantined: list[tuple[str, float, int]] = []
+        with _cleanup_lock:
+            for proxy in pool:
+                state = _proxy_reputation.setdefault(proxy, _new_proxy_reputation_state())
+                _expire_proxy_quarantine_locked(proxy, current_time)
+                score = int(state.get("score", 0))
+                consecutive_failures = int(state.get("consecutive_failures", 0))
+                quarantined_until = float(state.get("quarantined_until") or 0.0)
+                if quarantined_until > current_time:
+                    quarantined.append((proxy, quarantined_until, score))
+                else:
+                    healthy.append((proxy, score, consecutive_failures))
+
+        if healthy:
+            best_rank = max((score, -consecutive_failures) for _, score, consecutive_failures in healthy)
+            candidates = [
+                proxy
+                for proxy, score, consecutive_failures in healthy
+                if (score, -consecutive_failures) == best_rank
+            ]
+            return random.choice(candidates)
+
+        fallback_rank = min((quarantined_until, -score) for _, quarantined_until, score in quarantined)
+        fallback_candidates = [
+            proxy
+            for proxy, quarantined_until, score in quarantined
+            if (quarantined_until, -score) == fallback_rank
+        ]
+        chosen = random.choice(fallback_candidates)
+        logger.warning(
+            "All configured browser proxies are quarantined; reusing %s as fallback",
+            chosen,
+        )
+        return chosen
+
+    single_proxy = os.environ.get("HERMES_BROWSER_PROXY", "").strip()
+    if single_proxy:
+        state = _get_proxy_reputation_snapshot(single_proxy)
+        if float(state.get("quarantined_until") or 0.0) > time.time():
+            logger.warning("Single browser proxy %s is quarantined but no alternatives are configured", single_proxy)
+    return single_proxy or None
+
+
+def _set_session_fingerprint_profile(session_info: dict[str, Any], seed: int) -> None:
+    """Bind UA + viewport metadata to a session from fingerprint pool."""
+    ua, _platform, _vendor, sw, sh, _tz = _fingerprint_profile_from_seed(seed)
+    session_info["fingerprint_seed"] = seed
+    session_info["viewport"] = {"width": sw, "height": sh}
+    session_info["user_agent"] = ua
+
+
 def _build_random_stealth_js(seed: int = 0) -> str:
     """Return stealth JS with a fingerprint picked from the pool (deterministic by seed)."""
-    fp = _FINGERPRINT_POOL[seed % len(_FINGERPRINT_POOL)]
+    fp = _fingerprint_profile_from_seed(seed)
     ua, platform, vendor, sw, sh, tz = fp
     hardware_concurrency = (4, 8, 12, 16)[seed % 4]
     device_memory = (4, 8, 16)[seed % 3]
@@ -480,7 +667,19 @@ def _apply_local_stealth_profile(task_id: str, seed: Optional[int] = None) -> Op
     if not _is_local_backend():
         return None
     try:
-        fp_seed = seed if seed is not None else (int(time.time() * 1000) + random.randint(0, 997))
+        session_info = _get_session_info(task_id)
+        if seed is not None:
+            fp_seed = seed
+            if isinstance(session_info, dict):
+                _set_session_fingerprint_profile(session_info, fp_seed)
+        else:
+            existing_seed = session_info.get("fingerprint_seed") if isinstance(session_info, dict) else None
+            if isinstance(existing_seed, int):
+                fp_seed = existing_seed
+            else:
+                fp_seed = _choose_fingerprint_seed()
+                if isinstance(session_info, dict):
+                    _set_session_fingerprint_profile(session_info, fp_seed)
         _run_browser_command(task_id, "eval", [_build_random_stealth_js(fp_seed)], timeout=5)
         return fp_seed
     except Exception:
@@ -857,9 +1056,11 @@ def _socket_safe_tmpdir() -> str:
     return tempfile.gettempdir()
 
 
-# Track active sessions per task
-# Stores: session_name (always), bb_session_id + cdp_url (cloud mode only)
-_active_sessions: Dict[str, Dict[str, str]] = {}  # task_id -> {session_name, ...}
+# Track active sessions per task.
+# Stores: session_name (always), bb_session_id + cdp_url (cloud mode only),
+# and local fingerprint/proxy metadata when available.
+_active_sessions: Dict[str, Dict[str, Any]] = {}  # task_id -> {session_name, ...}
+_proxy_reputation: Dict[str, Dict[str, Any]] = {}
 _recording_sessions: set = set()  # task_ids with active recordings
 
 # Flag to track if cleanup has been done
@@ -880,7 +1081,7 @@ _session_last_activity: Dict[str, float] = {}
 # Background cleanup thread state
 _cleanup_thread = None
 _cleanup_running = False
-# Protects _session_last_activity AND _active_sessions for thread safety
+# Protects _session_last_activity, _active_sessions, and _proxy_reputation for thread safety
 # (subagents run concurrently via ThreadPoolExecutor)
 _cleanup_lock = threading.Lock()
 
@@ -1306,20 +1507,30 @@ BROWSER_TOOL_SCHEMAS = [
 # Utility Functions
 # ============================================================================
 
-def _create_local_session(task_id: str) -> Dict[str, str]:
+def _create_local_session(task_id: str) -> Dict[str, Any]:
     import uuid
     session_name = f"h_{uuid.uuid4().hex[:10]}"
+    fp_seed = _choose_fingerprint_seed()
+    proxy = _choose_local_proxy()
+    proxy_bypass = os.environ.get("HERMES_BROWSER_PROXY_BYPASS", "").strip()
+
     logger.info("Created local browser session %s for task %s",
                 session_name, task_id)
-    return {
+    session_info: Dict[str, Any] = {
         "session_name": session_name,
         "bb_session_id": None,
         "cdp_url": None,
-        "features": {"local": True},
+        "features": {"local": True, "proxies": bool(proxy)},
     }
+    _set_session_fingerprint_profile(session_info, fp_seed)
+    if proxy:
+        session_info["proxy"] = proxy
+    if proxy_bypass:
+        session_info["proxy_bypass"] = proxy_bypass
+    return session_info
 
 
-def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
+def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, Any]:
     """Create a session that connects to a user-supplied CDP endpoint."""
     import uuid
     session_name = f"cdp_{uuid.uuid4().hex[:10]}"
@@ -1333,7 +1544,7 @@ def _create_cdp_session(task_id: str, cdp_url: str) -> Dict[str, str]:
     }
 
 
-def _get_session_info(task_id: Optional[str] = None) -> Dict[str, str]:
+def _get_session_info(task_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Get or create session info for the given task.
     
@@ -1578,6 +1789,28 @@ def _run_browser_command(
         # Local mode — launch a headless Chromium instance
         backend_args = ["--session", session_info["session_name"]]
 
+        # Local Chromium profile hardening: keep launch-time viewport and UA
+        # aligned with the selected fingerprint, and optionally route through
+        # a proxy endpoint for IP/network rotation testing.
+        viewport = session_info.get("viewport")
+        if isinstance(viewport, dict):
+            width = int(viewport.get("width") or 0)
+            height = int(viewport.get("height") or 0)
+            if width > 0 and height > 0:
+                backend_args += ["--args", f"--window-size={width},{height}"]
+
+        user_agent = str(session_info.get("user_agent") or "").strip()
+        if user_agent:
+            backend_args += ["--user-agent", user_agent]
+
+        proxy = str(session_info.get("proxy") or "").strip()
+        if proxy:
+            backend_args += ["--proxy", proxy]
+
+        proxy_bypass = str(session_info.get("proxy_bypass") or "").strip()
+        if proxy_bypass:
+            backend_args += ["--proxy-bypass", proxy_bypass]
+
     # Keep concrete executable paths intact, even when they contain spaces.
     # Only the synthetic npx fallback needs to expand into multiple argv items.
     cmd_prefix = ["npx", "agent-browser"] if browser_cmd == "npx agent-browser" else [browser_cmd]
@@ -1634,6 +1867,12 @@ def _run_browser_command(
             proc.wait()
             logger.warning("browser '%s' timed out after %ds (task=%s, socket_dir=%s)",
                            command, timeout, task_id, task_socket_dir)
+            if command == "open":
+                _record_session_proxy_outcome(
+                    session_info,
+                    "command_failure",
+                    reason=f"Command timed out after {timeout} seconds",
+                )
             return {"success": False, "error": f"Command timed out after {timeout} seconds"}
 
         with open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
@@ -1661,6 +1900,12 @@ def _run_browser_command(
         # Some commands (close, record) legitimately return no output.
         if not stdout_text and returncode == 0 and command not in _EMPTY_OK_COMMANDS:
             logger.warning("browser '%s' returned empty output (rc=0)", command)
+            if command == "open":
+                _record_session_proxy_outcome(
+                    session_info,
+                    "command_failure",
+                    reason=f"Browser command '{command}' returned no output",
+                )
             return {"success": False, "error": f"Browser command '{command}' returned no output"}
 
         if stdout_text:
@@ -1673,6 +1918,12 @@ def _run_browser_command(
                         logger.warning("snapshot returned empty content. "
                                        "Possible stale daemon or CDP connection issue. "
                                        "returncode=%s", returncode)
+                if command == "open" and not parsed.get("success"):
+                    _record_session_proxy_outcome(
+                        session_info,
+                        "command_failure",
+                        reason=str(parsed.get("error") or "browser open failed"),
+                    )
                 return parsed
             except json.JSONDecodeError:
                 raw = stdout_text[:2000]
@@ -1699,6 +1950,12 @@ def _run_browser_command(
                             },
                         }
 
+                if command == "open":
+                    _record_session_proxy_outcome(
+                        session_info,
+                        "command_failure",
+                        reason=f"Non-JSON output from agent-browser for '{command}'",
+                    )
                 return {
                     "success": False,
                     "error": f"Non-JSON output from agent-browser for '{command}': {raw}"
@@ -1708,12 +1965,20 @@ def _run_browser_command(
         if returncode != 0:
             error_msg = stderr.strip() if stderr else f"Command failed with code {returncode}"
             logger.warning("browser '%s' failed (rc=%s): %s", command, returncode, error_msg[:300])
+            if command == "open":
+                _record_session_proxy_outcome(
+                    session_info,
+                    "command_failure",
+                    reason=error_msg,
+                )
             return {"success": False, "error": error_msg}
         
         return {"success": True, "data": {}}
         
     except Exception as e:
         logger.warning("browser '%s' exception: %s", command, e, exc_info=True)
+        if command == "open":
+            _record_session_proxy_outcome(session_info, "command_failure", reason=str(e))
         return {"success": False, "error": str(e)}
 
 
@@ -2191,6 +2456,7 @@ def browser_navigate(
                 if not matched_pattern:
                     response["challenge_cleared_after_wait"] = True
                     response["challenge_wait_seconds"] = wait_seconds
+                    _record_session_proxy_outcome(session_info, "success")
                     return json.dumps(response, ensure_ascii=False)
 
             retry_limit = _get_bot_detection_retry_limit()
@@ -2202,6 +2468,7 @@ def browser_navigate(
                     _bot_retry_attempt + 1,
                     retry_limit,
                 )
+                _record_session_proxy_outcome(session_info, "bot_detection", reason=matched_pattern)
                 cleanup_browser(effective_task_id)
                 time.sleep(_bot_retry_delay_seconds(_bot_retry_attempt + 1))
                 retried = json.loads(
@@ -2218,6 +2485,7 @@ def browser_navigate(
                     retried["challenge_wait_seconds"] = wait_seconds
                 return json.dumps(retried, ensure_ascii=False)
 
+            _record_session_proxy_outcome(session_info, "bot_detection", reason=matched_pattern)
             return json.dumps(
                 _build_bot_detection_failure_response(
                     matched_pattern=matched_pattern,
@@ -2230,6 +2498,7 @@ def browser_navigate(
                 ensure_ascii=False,
             )
 
+        _record_session_proxy_outcome(session_info, "success")
         return json.dumps(response, ensure_ascii=False)
     else:
         return json.dumps({
@@ -2344,8 +2613,6 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
     The model then synthesises all sources and returns a summary to the user
     that includes the site names at the end.
     """
-    import time as _time
-
     normalized_query = " ".join((query or "").split())
     if not normalized_query:
         return json.dumps({"success": False, "error": "Search query cannot be empty"}, ensure_ascii=False)
@@ -2387,20 +2654,10 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
 
     sources: list[dict[str, Any]] = []
     blocked_engines: list[str] = []
-    fp_seed_base = int(_time.time() * 1000)
-
-    for idx, (engine, url) in enumerate(all_engines):
-        # Reset session between engines to get a fresh fingerprint
+    for engine, url in all_engines:
+        # Reset session between engines to get a fresh fingerprint/IP profile.
         try:
             cleanup_browser(task_id or "default")
-        except Exception:
-            pass
-
-        # Inject a different fingerprint for each site attempt
-        fp_seed = (fp_seed_base + idx) % len(_FINGERPRINT_POOL)
-        try:
-            if _is_local_backend():
-                _run_browser_command(task_id or "default", "eval", [_build_random_stealth_js(fp_seed)], timeout=5)
         except Exception:
             pass
 

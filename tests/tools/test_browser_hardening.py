@@ -18,6 +18,9 @@ def _reset_caches():
     bt._agent_browser_resolved = False
     bt._cached_command_timeout = None
     bt._command_timeout_resolved = False
+    bt._active_sessions.clear()
+    bt._session_last_activity.clear()
+    bt._proxy_reputation.clear()
     # lru_cache for _discover_homebrew_node_dirs
     if hasattr(bt._discover_homebrew_node_dirs, "cache_clear"):
         bt._discover_homebrew_node_dirs.cache_clear()
@@ -763,6 +766,113 @@ class TestFingerprintRotation:
     def test_multi_search_engines_has_15_entries(self):
         import tools.browser_tool as bt
         assert len(bt._MULTI_SEARCH_ENGINES) >= 15
+
+    def test_create_local_session_uses_non_800x600_viewport(self):
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "_choose_fingerprint_seed", return_value=0):
+            session = bt._create_local_session("task-1")
+
+        viewport = session.get("viewport", {})
+        assert viewport.get("width")
+        assert viewport.get("height")
+        assert (viewport.get("width"), viewport.get("height")) != (800, 600)
+        assert session.get("user_agent")
+
+    def test_create_local_session_can_select_proxy_from_pool(self):
+        import tools.browser_tool as bt
+
+        with patch.dict(os.environ, {"HERMES_BROWSER_PROXY_POOL": "http://p1:8080,http://p2:8080"}), \
+             patch("tools.browser_tool.random.choice", return_value="http://p2:8080"), \
+             patch.object(bt, "_choose_fingerprint_seed", return_value=0):
+            session = bt._create_local_session("task-2")
+
+        assert session.get("proxy") == "http://p2:8080"
+        assert session.get("features", {}).get("proxies") is True
+
+    def test_choose_local_proxy_skips_quarantined_pool_entry(self):
+        import time
+        import tools.browser_tool as bt
+
+        bt._proxy_reputation["http://p1:8080"] = {
+            "score": -4,
+            "successes": 0,
+            "failures": 2,
+            "consecutive_failures": 2,
+            "quarantined_until": time.time() + 600,
+            "quarantine_count": 1,
+            "last_error": "challenge",
+            "last_outcome": "bot_detection",
+            "last_updated": time.time(),
+        }
+
+        with patch.dict(os.environ, {"HERMES_BROWSER_PROXY_POOL": "http://p1:8080,http://p2:8080"}):
+            assert bt._choose_local_proxy() == "http://p2:8080"
+
+
+class TestProxyReputation:
+
+    def test_record_proxy_outcome_quarantines_after_failures(self):
+        import time
+        import tools.browser_tool as bt
+
+        with patch.dict(os.environ, {
+            "HERMES_BROWSER_PROXY_QUARANTINE_SECONDS": "120",
+            "HERMES_BROWSER_PROXY_FAILURE_THRESHOLD": "2",
+        }):
+            bt._record_proxy_outcome("http://p1:8080", "command_failure", reason="timeout")
+            state = bt._get_proxy_reputation_snapshot("http://p1:8080")
+            assert state["score"] == -1
+            assert state["consecutive_failures"] == 1
+            assert state["quarantined_until"] == 0.0
+
+            bt._record_proxy_outcome("http://p1:8080", "bot_detection", reason="challenge")
+            state = bt._get_proxy_reputation_snapshot("http://p1:8080")
+            assert state["score"] <= -4
+            assert state["consecutive_failures"] == 2
+            assert state["quarantined_until"] > time.time()
+
+    def test_navigate_bot_detection_quarantines_current_proxy_and_rewards_recovery(self):
+        import time
+        import json
+        import tools.browser_tool as bt
+
+        session_one = {
+            "_first_nav": False,
+            "proxy": "http://p1:8080",
+            "features": {"local": True, "proxies": True},
+        }
+        session_two = {
+            "_first_nav": False,
+            "proxy": "http://p2:8080",
+            "features": {"local": True, "proxies": True},
+        }
+
+        with patch.object(bt, "_get_session_info", side_effect=[session_one, session_two]), \
+             patch.object(bt, "_should_wait_for_bot_challenge", return_value=False), \
+             patch.object(bt, "_get_bot_detection_retry_limit", return_value=1), \
+                         patch.object(bt, "_apply_local_stealth_profile", return_value=None), \
+             patch("tools.browser_tool.time.sleep", return_value=None), \
+             patch.object(bt, "cleanup_browser", return_value=None), \
+             patch.object(
+                 bt,
+                 "_run_browser_command",
+                 side_effect=[
+                     {"success": True, "data": {"title": "Protected Page", "url": "https://example.com"}},
+                     {"success": True, "data": {"snapshot": "Please verify you are human", "refs": {}}},
+                     {"success": True, "data": {"title": "Normal Page", "url": "https://example.com"}},
+                     {"success": True, "data": {"snapshot": '- link "Recovered" [ref=e1]', "refs": {"e1": {}}}},
+                 ],
+             ):
+            result = json.loads(bt.browser_navigate("https://example.com", task_id="test"))
+
+        assert result["success"] is True
+        state_one = bt._get_proxy_reputation_snapshot("http://p1:8080")
+        state_two = bt._get_proxy_reputation_snapshot("http://p2:8080")
+        assert state_one["last_outcome"] == "bot_detection"
+        assert state_one["quarantined_until"] > time.time()
+        assert state_two["last_outcome"] == "success"
+        assert state_two["score"] >= 1
 
 
 # ---------------------------------------------------------------------------
