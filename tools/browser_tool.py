@@ -175,6 +175,7 @@ _BOT_DETECTION_PATTERNS = (
     "bot detected",
     "verification required",
     "please verify",
+    "human verification",
     "are you a robot",
     "captcha",
     "cloudflare",
@@ -182,13 +183,17 @@ _BOT_DETECTION_PATTERNS = (
     "checking your browser",
     "just a moment",
     "attention required",
+    "complete the following challenge",
+    "please complete the challenge",
+    "automated requests",
+    "automated traffic",
     "unusual traffic",
     "verify you are human",
     "press and hold",
 )
 
 _BROWSER_SEARCH_ENGINES = (
-    ("duckduckgo", "https://duckduckgo.com/?q={query}&ia=web"),
+    ("duckduckgo", "https://html.duckduckgo.com/html/?q={query}"),
     ("bing", "https://www.bing.com/search?q={query}"),
 )
 
@@ -1380,6 +1385,46 @@ def _google_search_guidance(url: str) -> str | None:
     return None
 
 
+def _count_snapshot_links(snapshot_text: str) -> int:
+    """Count snapshot link entries to distinguish result pages from landing pages."""
+    if not snapshot_text:
+        return 0
+    return len(re.findall(r"(^|\n)\s*-\s+link\b", snapshot_text.lower()))
+
+
+def _browser_search_page_failure_reason(engine: str, result: dict[str, Any], query: str) -> str | None:
+    """Return a reason when a browser search page is clearly unusable."""
+    title = str(result.get("title") or "")
+    snapshot = str(result.get("snapshot") or "")
+    final_url = str(result.get("url") or "")
+
+    if result.get("bot_detection_detected"):
+        return result.get("error") or "bot-detection challenge"
+
+    matched_pattern = _detect_bot_detection_signal(title, snapshot, final_url)
+    if matched_pattern:
+        return f"bot-detection challenge ('{matched_pattern}')"
+
+    haystack = "\n".join((title, snapshot, final_url)).lower()
+    link_count = _count_snapshot_links(snapshot)
+    query_terms = [term for term in re.findall(r"[a-z0-9]+", query.lower()) if len(term) > 2]
+    query_hits = sum(1 for term in query_terms[:4] if term in haystack)
+
+    if engine == "duckduckgo":
+        if title.strip().lower() == "duckduckgo":
+            return "DuckDuckGo landing page without usable results"
+        if "duckduckgo" in haystack and link_count < 2 and query_hits == 0:
+            return "DuckDuckGo page did not expose usable search results"
+
+    if engine == "bing":
+        if title.strip().lower() == "bing":
+            return "Bing landing page without usable results"
+        if "bing" in haystack and link_count < 2 and query_hits == 0:
+            return "Bing page did not expose usable search results"
+
+    return None
+
+
 # ============================================================================
 # Browser Tool Functions
 # ============================================================================
@@ -1553,17 +1598,18 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
 
     for engine, search_url in _build_browser_search_urls(normalized_query):
         result = json.loads(browser_navigate(search_url, task_id=task_id))
+        unusable_reason = _browser_search_page_failure_reason(engine, result, normalized_query)
         attempts.append(
             {
                 "engine": engine,
                 "url": search_url,
-                "success": bool(result.get("success")),
-                **({"error": result.get("error")} if result.get("error") else {}),
+                "success": bool(result.get("success")) and not unusable_reason,
+                **({"error": unusable_reason or result.get("error")} if (unusable_reason or result.get("error")) else {}),
                 **({"bot_detection_detected": True} if result.get("bot_detection_detected") else {}),
             }
         )
         last_result = result
-        if result.get("success"):
+        if result.get("success") and not unusable_reason:
             result["search_engine"] = engine
             result["search_query"] = normalized_query
             result["search_url"] = search_url

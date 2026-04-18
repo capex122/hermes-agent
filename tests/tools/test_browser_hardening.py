@@ -354,7 +354,61 @@ class TestBotDetectionHandling:
         assert result["search_engine"] == "bing"
         assert result["search_query"] == "saudi clubs"
         assert result["attempted_engines"] == ["duckduckgo", "bing"]
-        assert "duckduckgo.com/?q=saudi+clubs" in mock_navigate.call_args_list[0].args[0]
+        assert "html.duckduckgo.com/html/?q=saudi+clubs" in mock_navigate.call_args_list[0].args[0]
+
+    def test_browser_search_falls_back_when_first_page_is_search_landing_page(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({
+                    "success": True,
+                    "url": "https://html.duckduckgo.com/html/?q=saudi+clubs",
+                    "title": "DuckDuckGo",
+                    "snapshot": '- textbox "search" [ref=e1]',
+                }),
+                json.dumps({
+                    "success": True,
+                    "url": "https://www.bing.com/search?q=saudi+clubs",
+                    "title": "saudi clubs - Search",
+                    "snapshot": '- link "Result one" [ref=e1]\n- link "Result two" [ref=e2]',
+                }),
+            ],
+        ):
+            result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
+
+        assert result["success"] is True
+        assert result["search_engine"] == "bing"
+        assert result["attempted_engines"] == ["duckduckgo", "bing"]
+
+    def test_browser_search_treats_uncaught_challenge_page_as_failure(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({
+                    "success": True,
+                    "url": "https://html.duckduckgo.com/html/?q=saudi+clubs",
+                    "title": "DuckDuckGo",
+                    "snapshot": "Please complete the following challenge to continue",
+                }),
+                json.dumps({
+                    "success": False,
+                    "error": "Bing blocked",
+                }),
+            ],
+        ):
+            result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
+
+        assert result["success"] is False
+        assert result["attempted_engines"] == ["duckduckgo", "bing"]
+        assert "Last error: Bing blocked" in result["error"]
 
     def test_browser_search_reports_all_attempted_engines_on_failure(self):
         import json
