@@ -412,6 +412,10 @@ class TestBotDetectionHandling:
                     "success": False,
                     "error": "Bing blocked",
                 }),
+                json.dumps({
+                    "success": False,
+                    "error": "Yahoo blocked",
+                }),
             ],
         ), patch.object(
             bt,
@@ -421,8 +425,8 @@ class TestBotDetectionHandling:
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
         assert result["success"] is False
-        assert result["attempted_engines"] == ["duckduckgo", "bing"]
-        assert "Last error: Bing blocked" in result["error"]
+        assert result["attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
+        assert "next_step_hint" in result
 
     def test_browser_search_requires_actionable_results_before_success(self):
         import json
@@ -442,6 +446,10 @@ class TestBotDetectionHandling:
                     "success": False,
                     "error": "Bing blocked",
                 }),
+                json.dumps({
+                    "success": False,
+                    "error": "Yahoo blocked",
+                }),
             ],
         ), patch.object(
             bt,
@@ -451,7 +459,8 @@ class TestBotDetectionHandling:
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
         assert result["success"] is False
-        assert result["attempted_engines"] == ["duckduckgo", "bing"]
+        assert result["attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
+        assert "next_step_hint" in result
 
     def test_browser_search_reports_all_attempted_engines_on_failure(self):
         import json
@@ -462,11 +471,55 @@ class TestBotDetectionHandling:
             "browser_navigate",
             side_effect=[
                 json.dumps({"success": False, "error": "DuckDuckGo blocked", "bot_detection_detected": True}),
-                json.dumps({"success": False, "error": "Bing blocked"}),
+                json.dumps({"success": False, "error": "Bing blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
             ],
         ):
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
         assert result["success"] is False
-        assert result["attempted_engines"] == ["duckduckgo", "bing"]
+        assert result["attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
         assert result["bot_detection_detected"] is True
+
+    def test_browser_search_failure_includes_next_step_hint(self):
+        """Failure response must tell the model to use direct navigation instead of stopping."""
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "DDG blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Bing blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
+            ],
+        ):
+            result = json.loads(bt.browser_search("saudi clubs last 2 days", task_id="test"))
+
+        assert result["success"] is False
+        assert "next_step_hint" in result
+        hint = result["next_step_hint"]
+        # hint must point toward direct navigation, not giving up
+        assert "browser_navigate" in hint
+        assert "flashscore" in hint or "livescore" in hint or "bbc" in hint
+
+    def test_browser_search_failure_no_bot_detection_includes_generic_hint(self):
+        """Non-bot-blocked failure also gets a next_step_hint."""
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "timeout"}),
+                json.dumps({"success": False, "error": "timeout"}),
+                json.dumps({"success": False, "error": "timeout"}),
+            ],
+        ):
+            result = json.loads(bt.browser_search("some topic", task_id="test"))
+
+        assert result["success"] is False
+        assert "next_step_hint" in result
+        assert "browser_navigate" in result["next_step_hint"]

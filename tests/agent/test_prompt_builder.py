@@ -1082,6 +1082,13 @@ class TestSearchIntentGuidance:
         assert "cannot provide real-time information" in text
         assert "check a sports website/app" in text
 
+    def test_guidance_direct_nav_fallback_when_browser_search_fails(self):
+        """Prompt must tell model to do direct navigation when browser_search fails."""
+        text = build_search_intent_guidance({"browser_search", "browser_navigate"})
+        assert "browser_navigate" in text
+        assert "flashscore" in text or "livescore" in text or "bbc.com/sport" in text
+        assert "next_step_hint" in text
+
     def test_guidance_retries_lookup_before_giving_up(self):
         text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})
         assert "do not stop there" in text

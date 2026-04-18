@@ -195,6 +195,7 @@ _BOT_DETECTION_PATTERNS = (
 _BROWSER_SEARCH_ENGINES = (
     ("duckduckgo", "https://html.duckduckgo.com/html/?q={query}"),
     ("bing", "https://www.bing.com/search?q={query}"),
+    ("yahoo", "https://search.yahoo.com/search?p={query}"),
 )
 
 _SNAPSHOT_LINK_RE = re.compile(
@@ -209,6 +210,8 @@ JSON.stringify((() => {
         'li.b_algo h2 a',
         'h2 a',
         '[data-testid="result-title-a"]',
+        '#web a[href]',
+        '#organic a[href]',
         'main a[href]',
         '#links a[href]',
     ];
@@ -1753,6 +1756,7 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
                 result["attempted_engines"] = [attempt["engine"] for attempt in attempts]
             return json.dumps(result, ensure_ascii=False)
 
+    bot_blocked = any(attempt.get("bot_detection_detected") for attempt in attempts)
     return json.dumps(
         {
             "success": False,
@@ -1764,8 +1768,18 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             "search_query": normalized_query,
             "attempted_engines": [attempt["engine"] for attempt in attempts],
             "attempted_urls": [attempt["url"] for attempt in attempts],
-            **({"bot_detection_detected": True} if any(attempt.get("bot_detection_detected") for attempt in attempts) else {}),
+            **({"bot_detection_detected": True} if bot_blocked else {}),
             **({"challenge_pattern": last_result.get("challenge_pattern")} if last_result.get("challenge_pattern") else {}),
+            "next_step_hint": (
+                "Search engines are bot-blocked. Use browser_navigate to go directly to a "
+                "well-known authoritative website for this topic. For sports scores/results: "
+                "flashscore.com, livescore.com, bbc.com/sport. For news: bbc.com/news, "
+                "reuters.com, apnews.com. For general lookup: wikipedia.org. "
+                "Do NOT give up — navigate directly to a relevant site instead."
+                if bot_blocked else
+                "Search returned no usable results. Use browser_navigate to go directly "
+                "to a well-known authoritative website for this topic rather than stopping."
+            ),
         },
         ensure_ascii=False,
     )
