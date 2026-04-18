@@ -726,6 +726,72 @@ class TestBotDetectionHandling:
         assert "fallback_urls" in desc
         assert "CRITICAL" in desc or "REQUIRED" in desc
 
+    def test_browser_search_auto_falls_back_to_web_search_when_all_engines_fail(self):
+        """When every browser engine fails, transparently fall through to web_search.
+
+        This prevents the "1.2s [error] → model navigates google.com → infinite loop"
+        failure mode that bare-error responses caused.
+        """
+        import json
+        import tools.browser_tool as bt
+
+        fake_web_results = json.dumps({
+            "success": True,
+            "data": {
+                "web": [
+                    {
+                        "title": "Fire PDF Viewer",
+                        "url": "https://example.com/fire-pdf",
+                        "description": "A fast PDF reader.",
+                    },
+                ]
+            },
+        })
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "DDG blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Bing blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
+            ],
+        ), patch("tools.web_tools.web_search_tool", return_value=fake_web_results):
+            result = json.loads(bt.browser_search("fire pdf", task_id="test"))
+
+        assert result["success"] is True
+        assert result["fallback_used"] is True
+        assert result["search_engine"] == "web_search_fallback"
+        assert result["browser_attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
+        assert result["browser_bot_detection_detected"] is True
+        assert result["results_count"] == 1
+        assert result["source_results"][0]["url"] == "https://example.com/fire-pdf"
+
+    def test_browser_search_falls_back_to_original_error_when_web_search_also_fails(self):
+        """If web_search has no backend configured, original failure JSON is preserved."""
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "DDG fail"}),
+                json.dumps({"success": False, "error": "Bing fail"}),
+                json.dumps({"success": False, "error": "Yahoo fail"}),
+            ],
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"success": False, "error": "no backend configured"}),
+        ):
+            result = json.loads(bt.browser_search("fire pdf", task_id="test"))
+
+        assert result["success"] is False
+        assert "Browser search failed" in result["error"]
+        assert "fallback_urls" in result
+        # The improved next_action mentions both web_search and browser_navigate
+        assert "web_search" in result["required_next_action"]
+
 
 # ---------------------------------------------------------------------------
 # Fingerprint rotation

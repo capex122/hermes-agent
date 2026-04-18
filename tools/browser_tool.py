@@ -2257,8 +2257,8 @@ def _google_search_guidance(url: str) -> str | None:
     if path in ("", "/", "/search"):
         return (
             "Google search pages often trigger bot detection in browser-only lookup flows. "
-            "Use browser_search with the query instead, or navigate directly to a known "
-            "result page or a DuckDuckGo/Bing search URL that already includes the query."
+            "Use browser_search or web_search with the query instead. If you need to use a "
+            "Google URL directly, include the query string (e.g. https://www.google.com/search?q=...)."
         )
 
     return None
@@ -2652,6 +2652,56 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
 
     bot_blocked = any(attempt.get("bot_detection_detected") for attempt in attempts)
     fallback_urls = _build_fallback_urls(normalized_query)
+
+    # ── Auto-fallback to web_search ────────────────────────────────────────
+    # If every browser engine failed (network, bot detection, or empty results)
+    # transparently fall through to the configured web search backend(s).
+    # web_search has its own multi-backend fallback chain, so this gives the
+    # model real results instead of a useless error + a fragile "go navigate
+    # google.com" instruction that triggers _google_search_guidance.
+    try:
+        from tools.web_tools import web_search_tool
+
+        web_raw = web_search_tool(normalized_query, limit=10)
+        web_payload = json.loads(web_raw)
+        web_results = (web_payload.get("data") or {}).get("web") or []
+        if web_payload.get("success") and web_results:
+            return json.dumps(
+                {
+                    "success": True,
+                    "search_query": normalized_query,
+                    "search_engine": "web_search_fallback",
+                    "fallback_used": True,
+                    "browser_attempted_engines": [attempt["engine"] for attempt in attempts],
+                    "browser_failure_reason": last_result.get("error") or "all browser engines failed",
+                    **(
+                        {"browser_bot_detection_detected": True}
+                        if bot_blocked
+                        else {}
+                    ),
+                    "source_results": [
+                        {
+                            "title": (r.get("title") or "").strip(),
+                            "url": (r.get("url") or "").strip(),
+                            "description": (r.get("description") or r.get("snippet") or "").strip(),
+                        }
+                        for r in web_results
+                        if (r.get("url") or "").strip()
+                    ],
+                    "results_count": len(web_results),
+                    "next_step_hint": (
+                        "Browser search engines were unreachable; results came from the web_search "
+                        "API backend. Use the URLs in source_results with browser_navigate or "
+                        "web_extract to read individual pages."
+                    ),
+                },
+                ensure_ascii=False,
+            )
+    except Exception as fallback_err:  # noqa: BLE001
+        logger.warning(
+            "browser_search → web_search fallback failed: %s", str(fallback_err)[:200]
+        )
+
     return json.dumps(
         {
             "success": False,
@@ -2667,8 +2717,9 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             **({"challenge_pattern": last_result.get("challenge_pattern")} if last_result.get("challenge_pattern") else {}),
             "fallback_urls": fallback_urls,
             "required_next_action": (
-                f"REQUIRED: call browser_navigate immediately on one of these URLs — "
-                f"do NOT report failure to the user: {', '.join(fallback_urls[:2])}"
+                f"REQUIRED: call web_search with the same query, OR call browser_navigate on "
+                f"one of these URLs (each MUST include a path/query, not a bare hostname): "
+                f"{', '.join(fallback_urls[:2])}"
             ),
         },
         ensure_ascii=False,
