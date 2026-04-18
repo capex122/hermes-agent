@@ -528,10 +528,18 @@ def build_browser_search_playbook(
         "with an image-flavoured query (e.g. 'lionel messi photo', 'tesla model 3 image'). "
         "The tool auto-detects image intent and attaches an `image_results` array of "
         "direct image URLs (suitable for native messaging-platform delivery).",
-        "- When `image_results` is present, pick the single best matching URL and "
-        "include it in your final reply as markdown image syntax `![caption](url)`. "
-        "The gateway will deliver it as a native photo on Telegram/Discord/Slack/WhatsApp. "
-        "Do NOT just paste the raw URL as text and do NOT describe the image instead "
+        "- When `image_results` is present, the actual image URL to use is "
+        "`image_results[i].url` (a direct image file like .jpg/.png/.webp). "
+        "Pick the single best matching entry and include `![caption](image_results[i].url)` "
+        "in your final reply. The gateway delivers it as a native photo on "
+        "Telegram/Discord/Slack/WhatsApp.",
+        "- CRITICAL: Never use a URL from `websites_consulted`, `source_results[i].url`, "
+        "or any page/search-results URL as the image src — those are HTML pages, not "
+        "images, and will fail to upload as a photo. The image src MUST be a direct "
+        "image file URL from `image_results[i].url`"
+        + (" (or from a subsequent browser_get_images call)" if has_get_images else "")
+        + ".",
+        "- Do NOT just paste the raw URL as text and do NOT describe the image instead "
         "of sending it.",
         "- If `image_results` is empty but `source_results` are present, open the most "
         "relevant source URL with browser_navigate"

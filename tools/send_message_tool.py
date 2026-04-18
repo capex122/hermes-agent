@@ -96,11 +96,19 @@ SEND_MESSAGE_SCHEMA = {
     "name": "send_message",
     "description": (
         "Send a message to a connected messaging platform, or list available targets.\n\n"
-        "IMPORTANT: When the user asks to send to a specific channel or person "
+        "HOME-CHANNEL SHORTCUT: When the user just names a platform ('send to telegram', "
+        "'post to discord', 'send it to my telegram channel', etc.) WITHOUT naming a "
+        "specific channel, call this tool with target='<platform>' (e.g. target='telegram'). "
+        "The configured bot token and HOME channel for that platform are loaded "
+        "automatically from the user's gateway config — DO NOT ask the user for a chat ID, "
+        "channel name, or token, and DO NOT refuse with 'I don't know your channel'. "
+        "Just call send_message(target='telegram', message='...').\n\n"
+        "To deliver an image/photo, embed it in `message` as markdown `![caption](direct_image_url)`. "
+        "The direct_image_url must be the actual image file (e.g. from browser_search's "
+        "`image_results[i].url`), not a webpage URL. The gateway uploads it as a native photo.\n\n"
+        "EXPLICIT-TARGET CASE: When the user names a specific channel/person/thread "
         "(not just a bare platform name), call send_message(action='list') FIRST to see "
-        "available targets, then send to the correct one.\n"
-        "If the user just says a platform name like 'send to telegram', send directly "
-        "to the home channel without listing first."
+        "available targets, then send to the resolved one."
     ),
     "parameters": {
         "type": "object",
