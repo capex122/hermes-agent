@@ -2036,6 +2036,17 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             "error": "Search query cannot be empty",
         }, ensure_ascii=False)
 
+    # If the caller passed a URL as the "query", navigate to it directly.
+    _lq = normalized_query.lower()
+    if _lq.startswith(("http://", "https://")) or (
+        "/" in normalized_query and not " " in normalized_query and "." in normalized_query.split("/")[0]
+    ):
+        nav_url = normalized_query if _lq.startswith(("http://", "https://")) else f"https://{normalized_query}"
+        result = json.loads(browser_navigate(nav_url, task_id=task_id))
+        result["direct_navigation"] = True
+        result["note"] = "Query looked like a URL — navigated directly instead of searching."
+        return json.dumps(result, ensure_ascii=False)
+
     attempts: list[dict[str, Any]] = []
     last_result: dict[str, Any] = {}
 
@@ -2122,6 +2133,17 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
     normalized_query = " ".join((query or "").split())
     if not normalized_query:
         return json.dumps({"success": False, "error": "Search query cannot be empty"}, ensure_ascii=False)
+
+    # If the caller passed a URL, navigate directly instead of multi-searching.
+    _lq = normalized_query.lower()
+    if _lq.startswith(("http://", "https://")) or (
+        "/" in normalized_query and not " " in normalized_query and "." in normalized_query.split("/")[0]
+    ):
+        nav_url = normalized_query if _lq.startswith(("http://", "https://")) else f"https://{normalized_query}"
+        result = json.loads(browser_navigate(nav_url, task_id=task_id))
+        result["direct_navigation"] = True
+        result["note"] = "Query looked like a URL — navigated directly instead of multi-searching."
+        return json.dumps(result, ensure_ascii=False)
 
     encoded_query = urllib.parse.quote_plus(normalized_query)
 
