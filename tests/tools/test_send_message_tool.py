@@ -442,6 +442,34 @@ class TestSendTelegramMediaDelivery:
         assert "No deliverable text or media remained" in result["error"]
         bot.send_message.assert_not_awaited()
 
+    def test_sends_remote_image_url_via_telegram_native_url_passthrough(self, monkeypatch):
+        """Remote https://...jpg URLs should be forwarded to bot.send_photo
+        directly — Telegram fetches them server-side, no local file needed."""
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=10))
+        bot.send_photo = AsyncMock(return_value=SimpleNamespace(message_id=11))
+        bot.send_video = AsyncMock()
+        bot.send_voice = AsyncMock()
+        bot.send_audio = AsyncMock()
+        bot.send_document = AsyncMock()
+        _install_telegram_mock(monkeypatch, bot)
+
+        url = "https://example.com/some/path/messi.jpg"
+        result = asyncio.run(
+            _send_telegram(
+                "token",
+                "12345",
+                "Here you go",
+                media_files=[(url, False)],
+            )
+        )
+
+        assert result["success"] is True
+        bot.send_photo.assert_awaited_once()
+        # Photo should be the URL string, not a file handle
+        kwargs = bot.send_photo.await_args.kwargs
+        assert kwargs.get("photo") == url
+
 
 # ---------------------------------------------------------------------------
 # Regression: long messages are chunked before platform dispatch

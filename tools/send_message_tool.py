@@ -248,6 +248,12 @@ def _handle_send(args):
     from gateway.platforms.base import BasePlatformAdapter
 
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
+    # Also accept markdown image syntax: ![caption](https://example.com/img.jpg).
+    # Remote URLs are handled by the per-platform sender (Telegram natively
+    # accepts URLs in send_photo, etc.).
+    image_urls, cleaned_message = BasePlatformAdapter.extract_images(cleaned_message)
+    for img_url, _alt in image_urls:
+        media_files.append((img_url, False))
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
 
     used_home_channel = False
@@ -638,14 +644,41 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
                     raise
 
         for media_path, is_voice in media_files:
-            if not os.path.exists(media_path):
+            is_url = isinstance(media_path, str) and (
+                media_path.startswith("http://") or media_path.startswith("https://")
+            )
+            if not is_url and not os.path.exists(media_path):
                 warning = f"Media file not found, skipping: {media_path}"
                 logger.warning(warning)
                 warnings.append(warning)
                 continue
 
-            ext = os.path.splitext(media_path)[1].lower()
+            ext = os.path.splitext(media_path.split("?", 1)[0])[1].lower()
             try:
+                if is_url:
+                    # Telegram accepts URLs directly for send_photo/send_video/send_audio/etc.
+                    if ext in _IMAGE_EXTS or not ext:
+                        last_msg = await bot.send_photo(
+                            chat_id=int_chat_id, photo=media_path, **thread_kwargs
+                        )
+                    elif ext in _VIDEO_EXTS:
+                        last_msg = await bot.send_video(
+                            chat_id=int_chat_id, video=media_path, **thread_kwargs
+                        )
+                    elif ext in _VOICE_EXTS and is_voice:
+                        last_msg = await bot.send_voice(
+                            chat_id=int_chat_id, voice=media_path, **thread_kwargs
+                        )
+                    elif ext in _AUDIO_EXTS:
+                        last_msg = await bot.send_audio(
+                            chat_id=int_chat_id, audio=media_path, **thread_kwargs
+                        )
+                    else:
+                        last_msg = await bot.send_document(
+                            chat_id=int_chat_id, document=media_path, **thread_kwargs
+                        )
+                    continue
+
                 with open(media_path, "rb") as f:
                     if ext in _IMAGE_EXTS:
                         last_msg = await bot.send_photo(
