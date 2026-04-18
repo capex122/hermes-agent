@@ -24,6 +24,7 @@ from gateway.platforms.base import (
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
 )
+from gateway.session import SessionSource, build_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +622,59 @@ class TestTelegramPhotoBatching:
         task.cancel.assert_called_once()
         assert adapter._pending_photo_batch_tasks == {}
         assert adapter._pending_photo_batches == {}
+
+
+class TestTelegramResponseImageDelivery:
+    @pytest.mark.asyncio
+    async def test_process_message_background_sends_extracted_image_as_native_photo(self, adapter):
+        adapter._bot = SimpleNamespace(
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=301)),
+            send_photo=AsyncMock(return_value=SimpleNamespace(message_id=302)),
+        )
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return (
+                "Here is the image I found.\n"
+                "![Cat search result](https://example.com/cat.png)"
+            )
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+
+        event = MessageEvent(
+            text="show me a cat image",
+            source=SessionSource(
+                platform=Platform.TELEGRAM,
+                chat_id="-1001",
+                chat_type="group",
+                thread_id="17585",
+                user_id="user-1",
+                user_name="Alice",
+            ),
+            message_id="77",
+        )
+
+        with patch("tools.url_safety.is_safe_url", return_value=True):
+            await adapter._process_message_background(event, build_session_key(event.source))
+
+        adapter._bot.send_message.assert_awaited_once()
+        text_kwargs = adapter._bot.send_message.call_args.kwargs
+        assert text_kwargs["chat_id"] == -1001
+        assert text_kwargs["text"] == adapter.format_message("Here is the image I found.")
+        assert text_kwargs["reply_to_message_id"] == 77
+        assert text_kwargs["message_thread_id"] == 17585
+
+        adapter._bot.send_photo.assert_awaited_once()
+        photo_kwargs = adapter._bot.send_photo.call_args.kwargs
+        assert photo_kwargs["chat_id"] == -1001
+        assert photo_kwargs["photo"] == "https://example.com/cat.png"
+        assert photo_kwargs["caption"] == "Cat search result"
+        assert photo_kwargs["reply_to_message_id"] is None
+        assert photo_kwargs["message_thread_id"] == 17585
 
 
 # ---------------------------------------------------------------------------

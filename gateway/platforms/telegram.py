@@ -1191,6 +1191,98 @@ class TelegramAdapter(BasePlatformAdapter):
             logger.warning("[%s] send_update_prompt failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
+    @staticmethod
+    def _clarify_button_label(index: int, choice: str) -> str:
+        label = f"{index}. {choice.strip()}"
+        if utf16_len(label) <= 60:
+            return label
+        return _prefix_within_utf16_limit(label, 57) + "..."
+
+    async def send_clarify_prompt(
+        self,
+        chat_id: str,
+        prompt_id: str,
+        question: str,
+        choices: Optional[List[str]] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            lines = [f"❓ {question.strip()}"]
+            keyboard = None
+            if choices:
+                lines.append("")
+                for index, choice in enumerate(choices, start=1):
+                    lines.append(f"{index}. {choice}")
+                lines.append("")
+                lines.append("Tap a button below or reply with your own answer.")
+                rows = [
+                    [
+                        InlineKeyboardButton(
+                            self._clarify_button_label(index, choice),
+                            callback_data=f"cq:{prompt_id}:{index - 1}",
+                        )
+                    ]
+                    for index, choice in enumerate(choices, start=1)
+                ]
+                rows.append([
+                    InlineKeyboardButton(
+                        "Other (type your answer)",
+                        callback_data=f"cq:{prompt_id}:other",
+                    )
+                ])
+                keyboard = InlineKeyboardMarkup(rows)
+            else:
+                lines.append("")
+                lines.append("Reply with your answer.")
+
+            thread_id = self._metadata_thread_id(metadata)
+            msg = await self._bot.send_message(
+                chat_id=int(chat_id),
+                text="\n".join(lines).strip(),
+                reply_to_message_id=int(reply_to) if reply_to else None,
+                message_thread_id=self._message_thread_id_for_send(thread_id),
+                reply_markup=keyboard,
+                **self._link_preview_kwargs(),
+            )
+            return SendResult(success=True, message_id=str(msg.message_id))
+        except Exception as e:
+            logger.warning("[%s] send_clarify_prompt failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def finalize_clarify_prompt(
+        self,
+        chat_id: str,
+        prompt_id: str,
+        question: str,
+        selected_response: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del metadata
+        if not self._bot:
+            return
+
+        state = self._get_clarify_prompt(prompt_id=prompt_id)
+        if not state or not state.get("message_id"):
+            return
+
+        answer_text = selected_response.strip()
+        if utf16_len(answer_text) > 300:
+            answer_text = _prefix_within_utf16_limit(answer_text, 297) + "..."
+
+        try:
+            await self._bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=int(state["message_id"]),
+                text=f"❓ {question.strip()}\n\nAnswered: {answer_text}",
+                reply_markup=None,
+            )
+        except Exception as e:
+            logger.debug("[%s] finalize_clarify_prompt edit failed: %s", self.name, e)
+
     async def send_model_picker(
         self,
         chat_id: str,
@@ -1501,6 +1593,47 @@ class TelegramAdapter(BasePlatformAdapter):
             chat_id = str(query.message.chat_id) if query.message else None
             if chat_id:
                 await self._handle_model_picker_callback(query, data, chat_id)
+            return
+
+        if data.startswith("cq:"):
+            try:
+                _, prompt_id, selection = data.split(":", 2)
+            except ValueError:
+                await query.answer(text="Invalid selection.")
+                return
+
+            state = self._get_clarify_prompt(prompt_id=prompt_id)
+            if not state:
+                await query.answer(text="This question has expired.")
+                return
+
+            caller_id = str(getattr(query.from_user, "id", ""))
+            allowed_user_id = str(state.get("allowed_user_id") or "")
+            if allowed_user_id and caller_id != allowed_user_id:
+                await query.answer(text="⛔ This question is for someone else.")
+                return
+            if not self._is_callback_user_authorized(caller_id):
+                await query.answer(text="⛔ You are not authorized to answer this question.")
+                return
+
+            if selection == "other":
+                await query.answer(text="Reply with your answer in chat.")
+                return
+
+            try:
+                choice_index = int(selection)
+            except ValueError:
+                await query.answer(text="Invalid selection.")
+                return
+
+            choices = state.get("choices") or []
+            if choice_index < 0 or choice_index >= len(choices):
+                await query.answer(text="That option is no longer available.")
+                return
+
+            selected_choice = choices[choice_index]
+            self._resolve_clarify_response(prompt_id, selected_choice)
+            await query.answer(text=f"Selected: {selected_choice[:40]}")
             return
 
         # --- Update prompt callbacks ---

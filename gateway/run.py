@@ -8730,6 +8730,29 @@ class GatewayRunner:
                 _deliver_bg_review_message(message)
 
             agent.background_review_callback = _bg_review_send
+            def _clarify_callback_sync(question: str, choices: Optional[list[str]] = None) -> str:
+                clarify_adapter = self.adapters.get(source.platform)
+                if clarify_adapter is None:
+                    raise RuntimeError("Clarify tool is not available for this platform.")
+
+                timeout_seconds = float(os.getenv("HERMES_GATEWAY_CLARIFY_TIMEOUT_SECONDS", "300"))
+                future = asyncio.run_coroutine_threadsafe(
+                    clarify_adapter.prompt_for_clarification(
+                        chat_id=source.chat_id,
+                        question=question,
+                        choices=choices,
+                        session_key=session_key,
+                        allowed_user_id=source.user_id,
+                        allowed_user_name=source.user_name,
+                        metadata=_status_thread_metadata,
+                        reply_to=event_message_id,
+                        timeout=timeout_seconds,
+                    ),
+                    _loop_for_step,
+                )
+                return future.result(timeout=timeout_seconds + 15.0)
+
+            agent.clarify_callback = _clarify_callback_sync
             # Register the release hook on the adapter so base.py's finally
             # block can fire it after delivering the main response.
             if _status_adapter and session_key:

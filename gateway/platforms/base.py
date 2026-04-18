@@ -882,6 +882,8 @@ class BasePlatformAdapter(ABC):
         # Chats where typing indicator is paused (e.g. during approval waits).
         # _keep_typing skips send_typing when the chat_id is in this set.
         self._typing_paused: set = set()
+        self._clarify_prompts: Dict[str, Dict[str, Any]] = {}
+        self._clarify_prompt_sessions: Dict[str, str] = {}
 
     @property
     def has_fatal_error(self) -> bool:
@@ -1258,6 +1260,178 @@ class BasePlatformAdapter(ABC):
             text = f"{caption}\n{text}"
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to)
 
+    async def send_clarify_prompt(
+        self,
+        chat_id: str,
+        prompt_id: str,
+        question: str,
+        choices: Optional[List[str]] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        lines = [f"❓ {question.strip()}"]
+        if choices:
+            lines.append("")
+            for index, choice in enumerate(choices, start=1):
+                lines.append(f"{index}. {choice}")
+            lines.append("")
+            lines.append("Reply with a number or type your own answer.")
+        else:
+            lines.append("")
+            lines.append("Reply with your answer.")
+        del prompt_id
+        return await self.send(
+            chat_id=chat_id,
+            content="\n".join(lines).strip(),
+            reply_to=reply_to,
+            metadata=metadata,
+        )
+
+    async def finalize_clarify_prompt(
+        self,
+        chat_id: str,
+        prompt_id: str,
+        question: str,
+        selected_response: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        del chat_id, prompt_id, question, selected_response, metadata
+
+    @staticmethod
+    def _normalize_clarify_response(
+        response_text: str,
+        choices: Optional[List[str]] = None,
+    ) -> str:
+        response = str(response_text or "").strip()
+        if not choices or not response:
+            return response
+
+        choice_match = re.fullmatch(r"(?:option\s*)?(\d+)(?:[.)])?", response, re.IGNORECASE)
+        if choice_match:
+            choice_index = int(choice_match.group(1)) - 1
+            if 0 <= choice_index < len(choices):
+                return choices[choice_index]
+
+        normalized = response.casefold()
+        for choice in choices:
+            if normalized == choice.strip().casefold():
+                return choice
+        return response
+
+    def _get_clarify_prompt(
+        self,
+        *,
+        prompt_id: Optional[str] = None,
+        session_key: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if prompt_id is None and session_key is not None:
+            prompt_id = self._clarify_prompt_sessions.get(session_key)
+        if prompt_id is None:
+            return None
+        return self._clarify_prompts.get(prompt_id)
+
+    def _clear_clarify_prompt(self, prompt_id: str) -> None:
+        state = self._clarify_prompts.pop(prompt_id, None)
+        if not state:
+            return
+        session_key = state.get("session_key")
+        if session_key:
+            self._clarify_prompt_sessions.pop(session_key, None)
+
+    def _resolve_clarify_response(self, prompt_id: str, response_text: str) -> bool:
+        state = self._get_clarify_prompt(prompt_id=prompt_id)
+        if not state:
+            return False
+
+        future = state.get("future")
+        if future is None or future.done():
+            return True
+
+        normalized = self._normalize_clarify_response(response_text, state.get("choices"))
+        future.set_result(normalized)
+        return True
+
+    def cancel_clarify_prompt(self, session_key: str, reason: str) -> bool:
+        state = self._get_clarify_prompt(session_key=session_key)
+        if not state:
+            return False
+
+        future = state.get("future")
+        if future is not None and not future.done():
+            future.set_exception(RuntimeError(reason))
+        return True
+
+    async def prompt_for_clarification(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[List[str]],
+        session_key: str,
+        allowed_user_id: Optional[str] = None,
+        allowed_user_name: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        reply_to: Optional[str] = None,
+        timeout: float = 300.0,
+    ) -> str:
+        if not session_key:
+            raise RuntimeError("Clarify tool requires a session key.")
+        if session_key in self._clarify_prompt_sessions:
+            raise RuntimeError("Another clarification prompt is already pending for this session.")
+
+        normalized_choices = None
+        if choices:
+            normalized_choices = [str(choice).strip() for choice in choices if str(choice).strip()]
+            if not normalized_choices:
+                normalized_choices = None
+
+        prompt_id = uuid.uuid4().hex[:12]
+        future = asyncio.get_running_loop().create_future()
+        state = {
+            "prompt_id": prompt_id,
+            "session_key": session_key,
+            "chat_id": chat_id,
+            "question": question.strip(),
+            "choices": normalized_choices,
+            "future": future,
+            "allowed_user_id": str(allowed_user_id) if allowed_user_id is not None else None,
+            "allowed_user_name": allowed_user_name,
+            "metadata": metadata,
+        }
+        self._clarify_prompts[prompt_id] = state
+        self._clarify_prompt_sessions[session_key] = prompt_id
+
+        try:
+            send_result = await self.send_clarify_prompt(
+                chat_id=chat_id,
+                prompt_id=prompt_id,
+                question=state["question"],
+                choices=normalized_choices,
+                reply_to=reply_to,
+                metadata=metadata,
+            )
+            if not send_result.success:
+                raise RuntimeError(send_result.error or "Failed to send clarification prompt.")
+
+            state["message_id"] = send_result.message_id
+            selected_response = await asyncio.wait_for(future, timeout=timeout)
+
+            try:
+                await self.finalize_clarify_prompt(
+                    chat_id=chat_id,
+                    prompt_id=prompt_id,
+                    question=state["question"],
+                    selected_response=selected_response,
+                    metadata=metadata,
+                )
+            except Exception as exc:
+                logger.debug("[%s] Clarify prompt finalization failed: %s", self.name, exc)
+
+            return selected_response
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"Clarification timed out after {int(timeout)} seconds.") from exc
+        finally:
+            self._clear_clarify_prompt(prompt_id)
+
     @staticmethod
     def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
         """
@@ -1565,6 +1739,33 @@ class BasePlatformAdapter(ABC):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
+
+        pending_clarify = self._get_clarify_prompt(session_key=session_key)
+        if pending_clarify and event.text and event.text.strip():
+            if event.is_command():
+                command = event.get_command()
+                if command in {"stop", "new", "reset", "restart"}:
+                    self.cancel_clarify_prompt(
+                        session_key,
+                        f"Clarification cancelled by /{command}.",
+                    )
+            else:
+                allowed_user_id = pending_clarify.get("allowed_user_id")
+                caller_id = str(event.source.user_id) if event.source.user_id is not None else None
+                if allowed_user_id and caller_id != allowed_user_id:
+                    waiting_for = pending_clarify.get("allowed_user_name") or allowed_user_id
+                    _thread_meta = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                    await self._send_with_retry(
+                        chat_id=event.source.chat_id,
+                        content=f"⏳ This question is waiting for {waiting_for}.",
+                        reply_to=event.message_id,
+                        metadata=_thread_meta,
+                    )
+                    return
+
+                if self._resolve_clarify_response(pending_clarify["prompt_id"], event.text):
+                    logger.debug("[%s] Consumed clarify reply for %s", self.name, session_key)
+                    return
         
         # Check if there's already an active handler for this session
         if session_key in self._active_sessions:
