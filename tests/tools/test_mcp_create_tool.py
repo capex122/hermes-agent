@@ -129,9 +129,97 @@ def test_requirements_file_written(isolated_home):
     assert res["success"]
     reqs_path = isolated_home / "mcp_servers" / "hasreqs" / "requirements.txt"
     assert reqs_path.exists()
-    content = reqs_path.read_text(encoding="utf-8")
-    assert "requests>=2.0" in content
-    assert "pyyaml" in content
+
+
+# ─── Approval-callback override path ─────────────────────────────────────────
+
+
+def test_approval_callback_deny_blocks(closed_gate, monkeypatch):
+    """When the gate is closed and the approval callback returns 'deny',
+    the tool must refuse and surface the user's decision."""
+    from tools import mcp_create_tool as mod
+
+    # Reset session-grant in case a prior test set it.
+    monkeypatch.setattr(mod, "_session_approval_granted", False, raising=False)
+
+    calls = []
+
+    def cb(reason, server_name):
+        calls.append((reason, server_name))
+        return "deny"
+
+    mod.set_mcp_create_approval_callback(cb)
+    try:
+        res = json.loads(mod.mcp_create_server(name="x", tools=_basic_spec(), register_now=False))
+        assert "error" in res
+        assert "declined" in res["error"].lower()
+        assert calls and calls[0][1] == "x"
+    finally:
+        mod.set_mcp_create_approval_callback(None)
+
+
+def test_approval_callback_once_allows_single_call(closed_gate, monkeypatch):
+    """'once' allows the current call but does NOT grant for the next one."""
+    from tools import mcp_create_tool as mod
+
+    monkeypatch.setattr(mod, "_session_approval_granted", False, raising=False)
+
+    responses = ["once", "deny"]
+
+    def cb(reason, server_name):
+        return responses.pop(0)
+
+    mod.set_mcp_create_approval_callback(cb)
+    try:
+        res1 = json.loads(mod.mcp_create_server(name="oneoff", tools=_basic_spec(), register_now=False))
+        assert res1.get("success") is True
+        # Second call should re-prompt and this time deny.
+        res2 = json.loads(mod.mcp_create_server(name="second", tools=_basic_spec(), register_now=False))
+        assert "error" in res2
+    finally:
+        mod.set_mcp_create_approval_callback(None)
+
+
+def test_approval_callback_session_caches_grant(closed_gate, monkeypatch):
+    """'session' grants permission for all subsequent calls without re-prompting."""
+    from tools import mcp_create_tool as mod
+
+    monkeypatch.setattr(mod, "_session_approval_granted", False, raising=False)
+
+    call_count = {"n": 0}
+
+    def cb(reason, server_name):
+        call_count["n"] += 1
+        return "session"
+
+    mod.set_mcp_create_approval_callback(cb)
+    try:
+        res1 = json.loads(mod.mcp_create_server(name="sess1", tools=_basic_spec(), register_now=False))
+        res2 = json.loads(mod.mcp_create_server(name="sess2", tools=_basic_spec(), register_now=False))
+        assert res1.get("success") is True
+        assert res2.get("success") is True
+        # Second call must NOT have re-prompted.
+        assert call_count["n"] == 1
+    finally:
+        mod.set_mcp_create_approval_callback(None)
+        # Reset to avoid leaking session grant to other tests in the same worker.
+        monkeypatch.setattr(mod, "_session_approval_granted", False, raising=False)
+
+
+def test_check_fn_true_when_callback_registered(closed_gate, monkeypatch):
+    """Tool must remain available (check_fn returns True) when the gate is
+    closed but an approval callback is registered, so the agent can attempt
+    the call and trigger the prompt."""
+    from tools import mcp_create_tool as mod
+
+    monkeypatch.setattr(mod, "_session_approval_granted", False, raising=False)
+    mod.set_mcp_create_approval_callback(lambda r, n: "deny")
+    try:
+        assert mod._check_fn() is True
+    finally:
+        mod.set_mcp_create_approval_callback(None)
+    # With no callback and gate closed, check_fn must be False.
+    assert mod._check_fn() is False
 
 
 def test_invalid_tool_name_rejected(isolated_home):

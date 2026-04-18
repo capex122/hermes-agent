@@ -8753,6 +8753,40 @@ class GatewayRunner:
                 return future.result(timeout=timeout_seconds + 15.0)
 
             agent.clarify_callback = _clarify_callback_sync
+
+            # Wire MCP-create runtime override approval through the same
+            # platform clarify channel. When the agent calls
+            # mcp_create_server while the gate is closed, this asks the user
+            # via Telegram/Discord/Slack/etc. and routes their answer back.
+            try:
+                from tools.mcp_create_tool import set_mcp_create_approval_callback as _set_mcp_cb
+            except Exception:
+                _set_mcp_cb = None  # type: ignore
+
+            if _set_mcp_cb is not None:
+                def _mcp_approval_sync(reason: str, server_name: str) -> str:
+                    question = (
+                        f"The agent wants to create a new MCP server "
+                        f"'{server_name}', but mcp_create_server is "
+                        f"currently disabled ({reason}). Allow this?"
+                    )
+                    choices = [
+                        "once",
+                        "session",
+                        "always",
+                        "deny",
+                    ]
+                    try:
+                        ans = _clarify_callback_sync(question, choices) or ""
+                    except Exception:
+                        return ""
+                    al = ans.strip().lower()
+                    for k in ("once", "session", "always", "deny"):
+                        if al.startswith(k):
+                            return k
+                    return ""
+
+                _set_mcp_cb(_mcp_approval_sync)
             # Register the release hook on the adapter so base.py's finally
             # block can fire it after delivering the main response.
             if _status_adapter and session_key:

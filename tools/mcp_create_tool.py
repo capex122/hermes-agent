@@ -58,6 +58,27 @@ import yaml
 from hermes_constants import get_hermes_home, display_hermes_home
 from tools.registry import registry, tool_error
 
+# ─── Approval callback (for closed-gate runtime override) ────────────────────
+
+# Optional UI callback for asking the user whether to bypass a closed
+# mcp_create_server gate. Registered by cli.py / gateway/run.py at startup.
+# Signature: callback(reason: str, server_name: str) -> str
+# Return values:
+#   "once"    -> allow this single call, gate stays closed for next call
+#   "session" -> allow for the rest of the process lifetime
+#   "always"  -> allow + persist tools.mcp_create.enabled = true to config
+#   "deny"    -> refuse
+#   "" / None -> treated as deny (timeout)
+_mcp_create_approval_callback = None
+_session_approval_granted = False  # set by "session" or "always" responses
+
+
+def set_mcp_create_approval_callback(cb):
+    """Register a runtime override-prompt callback (CLI/gateway only)."""
+    global _mcp_create_approval_callback
+    _mcp_create_approval_callback = cb
+
+
 # ─── Gate ────────────────────────────────────────────────────────────────────
 
 
@@ -68,6 +89,10 @@ def _gate_open() -> bool:
     (``HERMES_DISABLE_MCP_CREATE``) and the legacy explicit-allow knob
     (``HERMES_ALLOW_MCP_CREATE``) for back-compat.
     """
+    # Runtime session-grant from a prior approval prompt wins over disable.
+    if _session_approval_granted:
+        return True
+
     # Explicit disable wins.
     disable_env = os.environ.get("HERMES_DISABLE_MCP_CREATE", "").strip().lower()
     if disable_env in ("1", "true", "yes", "on"):
@@ -93,6 +118,59 @@ def _gate_open() -> bool:
         pass
 
     return True
+
+
+def _gate_closed_reason() -> str:
+    """Best-effort human-readable description of WHY the gate is closed.
+    Used in the approval prompt so the user knows what they're overriding.
+    """
+    disable_env = os.environ.get("HERMES_DISABLE_MCP_CREATE", "").strip().lower()
+    if disable_env in ("1", "true", "yes", "on"):
+        return "HERMES_DISABLE_MCP_CREATE=1 in environment"
+    allow_env = os.environ.get("HERMES_ALLOW_MCP_CREATE", "").strip().lower()
+    if allow_env in ("0", "false", "no", "off"):
+        return "HERMES_ALLOW_MCP_CREATE=0 in environment"
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        sub = (cfg.get("tools", {}) or {}).get("mcp_create", {}) or {}
+        if sub.get("enabled") is False:
+            return "tools.mcp_create.enabled: false in config.yaml"
+    except Exception:
+        pass
+    return "unknown reason"
+
+
+def _persist_always_allow() -> None:
+    """Write tools.mcp_create.enabled: true to config.yaml so future sessions
+    don't re-prompt. Env-var disables still win at process start, so this
+    only sticks if the user also unsets HERMES_DISABLE_MCP_CREATE.
+    """
+    try:
+        config_path = get_hermes_home() / "config.yaml"
+        cfg: Dict[str, Any] = {}
+        if config_path.exists():
+            try:
+                loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+                if isinstance(loaded, dict):
+                    cfg = loaded
+            except Exception:
+                cfg = {}
+        tools_section = cfg.get("tools")
+        if not isinstance(tools_section, dict):
+            tools_section = {}
+            cfg["tools"] = tools_section
+        sub = tools_section.get("mcp_create")
+        if not isinstance(sub, dict):
+            sub = {}
+            tools_section["mcp_create"] = sub
+        sub["enabled"] = True
+        tmp = config_path.with_suffix(".yaml.tmp")
+        tmp.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        tmp.replace(config_path)
+    except Exception:
+        # Best-effort; if persistence fails the session grant still applies.
+        pass
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -262,11 +340,38 @@ def mcp_create_server(
     """
     # ── Gate ────────────────────────────────────────────────────────────
     if not _gate_open():
-        return tool_error(
-            "mcp_create_server is disabled. Unset HERMES_DISABLE_MCP_CREATE in "
-            "~/.hermes/.env or set tools.mcp_create.enabled: true in "
-            "~/.hermes/config.yaml to re-enable."
-        )
+        # Try to ask the user for a runtime override before giving up.
+        global _session_approval_granted
+        if _mcp_create_approval_callback is not None:
+            try:
+                reason = _gate_closed_reason()
+                response = _mcp_create_approval_callback(reason, name) or ""
+            except Exception:
+                response = ""
+            response = str(response).strip().lower()
+            if response == "always":
+                _session_approval_granted = True
+                _persist_always_allow()
+            elif response == "session":
+                _session_approval_granted = True
+            elif response == "once":
+                pass  # proceed but don't grant for next call
+            else:
+                return tool_error(
+                    f"mcp_create_server is disabled ({_gate_closed_reason()}) "
+                    "and the user declined the runtime override. Unset "
+                    "HERMES_DISABLE_MCP_CREATE in ~/.hermes/.env or set "
+                    "tools.mcp_create.enabled: true in ~/.hermes/config.yaml "
+                    "to re-enable."
+                )
+        else:
+            return tool_error(
+                f"mcp_create_server is disabled ({_gate_closed_reason()}). "
+                "Unset HERMES_DISABLE_MCP_CREATE in ~/.hermes/.env or set "
+                "tools.mcp_create.enabled: true in ~/.hermes/config.yaml to "
+                "re-enable. (No interactive owner is available to grant a "
+                "runtime override on this surface.)"
+            )
 
     # ── Validate inputs ─────────────────────────────────────────────────
     err = _validate_name(name)
@@ -453,6 +558,15 @@ _SCHEMA = {
 }
 
 
+def _check_fn() -> bool:
+    """Tool is available whenever the gate is open OR an interactive approval
+    callback is registered (so the agent can call it and the user gets asked
+    at runtime instead of the tool being silently hidden)."""
+    if _gate_open():
+        return True
+    return _mcp_create_approval_callback is not None
+
+
 registry.register(
     name="mcp_create_server",
     toolset="mcp_create",
@@ -467,6 +581,6 @@ registry.register(
         python_exec=args.get("python_exec"),
         task_id=kw.get("task_id"),
     ),
-    check_fn=_gate_open,
+    check_fn=_check_fn,
     requires_env=[],
 )

@@ -596,6 +596,10 @@ from tools.terminal_tool import set_sudo_password_callback
 from tools.skills_tool import set_secret_capture_callback
 from hermes_cli.callbacks import prompt_for_secret
 from tools.browser_tool import _emergency_cleanup_all_sessions as _cleanup_all_browsers
+try:
+    from tools.mcp_create_tool import set_mcp_create_approval_callback
+except Exception:  # pragma: no cover - mcp_create may be absent in stripped builds
+    set_mcp_create_approval_callback = None  # type: ignore
 
 # Guard to prevent cleanup from running multiple times on exit
 _cleanup_done = False
@@ -7297,6 +7301,35 @@ class HermesCLI:
         for line in reqs["details"].split("\n"):
             _cprint(f"    {line}")
 
+    def _mcp_create_approval_callback(self, reason: str, server_name: str) -> str:
+        """Approval prompt for runtime override of a closed mcp_create_server gate.
+
+        Reuses the existing clarify UI to give the user 4 choices when the
+        agent tries to create an MCP server but the gate is shut. Returns one
+        of "once" / "session" / "always" / "deny" (or "" on timeout).
+        """
+        question = (
+            f"The agent wants to create a new MCP server '{server_name}', "
+            f"but mcp_create_server is currently disabled "
+            f"({reason}). Allow this?"
+        )
+        choices = [
+            "once - allow this single call",
+            "session - allow for the rest of this session",
+            "always - allow + persist tools.mcp_create.enabled=true",
+            "deny - refuse and tell the agent",
+        ]
+        try:
+            answer = self._clarify_callback(question, choices) or ""
+        except Exception:
+            return ""
+        # Map the verbose label back to the canonical action keyword.
+        ans_lower = answer.strip().lower()
+        for key in ("once", "session", "always", "deny"):
+            if ans_lower.startswith(key):
+                return key
+        return ""
+
     def _clarify_callback(self, question, choices):
         """
         Platform callback for the clarify tool. Called from the agent thread.
@@ -8261,6 +8294,8 @@ class HermesCLI:
         # Register callbacks so terminal_tool prompts route through our UI
         set_sudo_password_callback(self._sudo_password_callback)
         set_secret_capture_callback(self._secret_capture_callback)
+        if set_mcp_create_approval_callback is not None:
+            set_mcp_create_approval_callback(self._mcp_create_approval_callback)
         
         # Key bindings for the input area
         kb = KeyBindings()
