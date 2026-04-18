@@ -24,6 +24,7 @@ from agent.prompt_builder import (
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
+    build_openai_model_execution_guidance,
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
@@ -1027,6 +1028,23 @@ class TestOpenAIModelExecutionGuidance:
     def test_guidance_is_string(self):
         assert isinstance(OPENAI_MODEL_EXECUTION_GUIDANCE, str)
         assert len(OPENAI_MODEL_EXECUTION_GUIDANCE) > 100
+
+    def test_dynamic_guidance_prefers_loaded_search_tools(self):
+        text = build_openai_model_execution_guidance(
+            {"web_source_search", "browser_navigate", "browser_snapshot"}
+        )
+        assert "Current facts (weather, news, versions) → use web_source_search" in text
+        assert "if search tools are unavailable, use browser_navigate with browser_snapshot" in text
+
+    def test_dynamic_guidance_falls_back_to_browser_when_search_unavailable(self):
+        text = build_openai_model_execution_guidance(
+            {"browser_navigate", "browser_snapshot", "browser_vision"}
+        )
+        assert (
+            "Current facts (weather, news, versions) → use browser_navigate "
+            "with browser_snapshot or browser_vision"
+        ) in text
+        assert "for example: browser_navigate, browser_snapshot, or browser_vision" in text
 
 
 # =========================================================================

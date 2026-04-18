@@ -717,12 +717,17 @@ class TestBuildSystemPrompt:
 class TestToolUseEnforcementConfig:
     """Tests for the agent.tool_use_enforcement config option."""
 
-    def _make_agent(self, model="openai/gpt-4.1", tool_use_enforcement="auto"):
+    def _make_agent(
+        self,
+        model="openai/gpt-4.1",
+        tool_use_enforcement="auto",
+        tool_names=("terminal", "web_search"),
+    ):
         """Create an agent with tools and a specific enforcement config."""
         with (
             patch(
                 "run_agent.get_tool_definitions",
-                return_value=_make_tool_defs("terminal", "web_search"),
+                return_value=_make_tool_defs(*tool_names),
             ),
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
@@ -747,6 +752,7 @@ class TestToolUseEnforcementConfig:
         agent = self._make_agent(model="openai/gpt-4.1", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert "Current facts (weather, news, versions) → use web_search" in prompt
 
     def test_auto_injects_for_codex(self):
         from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
@@ -840,6 +846,19 @@ class TestToolUseEnforcementConfig:
             a.client = MagicMock()
             prompt = a._build_system_prompt()
             assert TOOL_USE_ENFORCEMENT_GUIDANCE not in prompt
+
+    def test_gpt_prompt_falls_back_to_browser_tools_when_web_search_missing(self):
+        agent = self._make_agent(
+            model="openai/gpt-4.1",
+            tool_use_enforcement="auto",
+            tool_names=("browser_navigate", "browser_snapshot", "browser_vision"),
+        )
+        prompt = agent._build_system_prompt()
+        assert (
+            "Current facts (weather, news, versions) → use browser_navigate "
+            "with browser_snapshot or browser_vision"
+        ) in prompt
+        assert "for example: browser_navigate, browser_snapshot, or browser_vision" in prompt
 
 
 class TestInvalidateSystemPrompt:

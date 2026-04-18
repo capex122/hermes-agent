@@ -189,69 +189,165 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
 # Add new patterns here when a model family needs explicit steering.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok")
 
+
+def _join_tool_names(tool_names: list[str]) -> str:
+    """Render tool names as a short natural-language list."""
+    if not tool_names:
+        return ""
+    if len(tool_names) == 1:
+        return tool_names[0]
+    if len(tool_names) == 2:
+        return f"{tool_names[0]} or {tool_names[1]}"
+    return f"{', '.join(tool_names[:-1])}, or {tool_names[-1]}"
+
+
+def _build_current_facts_tool_guidance(available_tools: Optional[set[str] | list[str]] = None) -> str:
+    """Describe which web-capable tools to use for current-facts lookups."""
+    if available_tools is None:
+        return (
+            "use an available web-capable tool. Prefer web_search, web_source_search, "
+            "or web_deep_search when present; use web_fetch or web_extract for known URLs; "
+            "use browser_navigate with browser_snapshot or browser_vision when search tools "
+            "are unavailable"
+        )
+
+    available = set(available_tools)
+    search_tools = [
+        name for name in ("web_search", "web_source_search", "web_deep_search")
+        if name in available
+    ]
+    fetch_tools = [name for name in ("web_fetch", "web_extract") if name in available]
+    browser_helpers = [
+        name for name in ("browser_snapshot", "browser_vision")
+        if name in available
+    ]
+
+    browser_guidance = ""
+    if "browser_navigate" in available:
+        browser_guidance = "use browser_navigate"
+        if browser_helpers:
+            browser_guidance += f" with {_join_tool_names(browser_helpers)}"
+
+    if search_tools:
+        guidance = f"use {_join_tool_names(search_tools)}"
+        if fetch_tools:
+            guidance += f"; use {_join_tool_names(fetch_tools)} for known URLs"
+        if browser_guidance:
+            guidance += f"; if search tools are unavailable, {browser_guidance}"
+        return guidance
+
+    if browser_guidance:
+        if fetch_tools:
+            return f"{browser_guidance}; use {_join_tool_names(fetch_tools)} for known URLs"
+        return browser_guidance
+
+    if fetch_tools:
+        return f"use {_join_tool_names(fetch_tools)} for known URLs"
+
+    return "use an available lookup tool"
+
+
+def _build_missing_context_tool_examples(available_tools: Optional[set[str] | list[str]] = None) -> str:
+    """Return lookup-tool examples that match the active tool surface."""
+    if available_tools is None:
+        return "search_files, read_file, web_search, or browser_navigate"
+
+    available = set(available_tools)
+    examples = [
+        name
+        for name in (
+            "search_files",
+            "read_file",
+            "terminal",
+            "web_search",
+            "web_source_search",
+            "web_deep_search",
+            "web_fetch",
+            "web_extract",
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_vision",
+        )
+        if name in available
+    ]
+    if not examples:
+        return "the appropriate lookup tool"
+    return _join_tool_names(examples[:4])
+
+
+def build_openai_model_execution_guidance(
+    available_tools: Optional[set[str] | list[str]] = None,
+) -> str:
+    """Build GPT/Codex execution guidance using the tools available this session."""
+    current_facts_guidance = _build_current_facts_tool_guidance(available_tools)
+    missing_context_examples = _build_missing_context_tool_examples(available_tools)
+
+    return (
+        "# Execution discipline\n"
+        "<tool_persistence>\n"
+        "- Use tools whenever they improve correctness, completeness, or grounding.\n"
+        "- Do not stop early when another tool call would materially improve the result.\n"
+        "- If a tool returns empty or partial results, retry with a different query or "
+        "strategy before giving up.\n"
+        "- Keep calling tools until: (1) the task is complete, AND (2) you have verified "
+        "the result.\n"
+        "</tool_persistence>\n"
+        "\n"
+        "<mandatory_tool_use>\n"
+        "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
+        "- Arithmetic, math, calculations → use terminal or execute_code\n"
+        "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n"
+        "- Current time, date, timezone → use terminal (e.g. date)\n"
+        "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n"
+        "- File contents, sizes, line counts → use read_file, search_files, or terminal\n"
+        "- Git history, branches, diffs → use terminal\n"
+        f"- Current facts (weather, news, versions) → {current_facts_guidance}\n"
+        "Your memory and user profile describe the USER, not the system you are "
+        "running on. The execution environment may differ from what the user profile "
+        "says about their personal setup.\n"
+        "</mandatory_tool_use>\n"
+        "\n"
+        "<act_dont_ask>\n"
+        "When a question has an obvious default interpretation, act on it immediately "
+        "instead of asking for clarification. Examples:\n"
+        "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
+        "- 'What OS am I running?' → check the live system (don't use user profile)\n"
+        "- 'What time is it?' → run `date` (don't guess)\n"
+        "Only ask for clarification when the ambiguity genuinely changes what tool "
+        "you would call.\n"
+        "</act_dont_ask>\n"
+        "\n"
+        "<prerequisite_checks>\n"
+        "- Before taking an action, check whether prerequisite discovery, lookup, or "
+        "context-gathering steps are needed.\n"
+        "- Do not skip prerequisite steps just because the final action seems obvious.\n"
+        "- If a task depends on output from a prior step, resolve that dependency first.\n"
+        "</prerequisite_checks>\n"
+        "\n"
+        "<verification>\n"
+        "Before finalizing your response:\n"
+        "- Correctness: does the output satisfy every stated requirement?\n"
+        "- Grounding: are factual claims backed by tool outputs or provided context?\n"
+        "- Formatting: does the output match the requested format or schema?\n"
+        "- Safety: if the next step has side effects (file writes, commands, API calls), "
+        "confirm scope before executing.\n"
+        "</verification>\n"
+        "\n"
+        "<missing_context>\n"
+        "- If required context is missing, do NOT guess or hallucinate an answer.\n"
+        "- Use the appropriate lookup tool when missing information is retrievable "
+        f"(for example: {missing_context_examples}).\n"
+        "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
+        "- If you must proceed with incomplete information, label assumptions explicitly.\n"
+        "</missing_context>"
+    )
+
+
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes
 # where GPT models abandon work on partial results, skip prerequisite lookups,
 # hallucinate instead of using tools, and declare "done" without verification.
 # Inspired by patterns from OpenAI's GPT-5.4 prompting guide & OpenClaw PR #38953.
-OPENAI_MODEL_EXECUTION_GUIDANCE = (
-    "# Execution discipline\n"
-    "<tool_persistence>\n"
-    "- Use tools whenever they improve correctness, completeness, or grounding.\n"
-    "- Do not stop early when another tool call would materially improve the result.\n"
-    "- If a tool returns empty or partial results, retry with a different query or "
-    "strategy before giving up.\n"
-    "- Keep calling tools until: (1) the task is complete, AND (2) you have verified "
-    "the result.\n"
-    "</tool_persistence>\n"
-    "\n"
-    "<mandatory_tool_use>\n"
-    "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
-    "- Arithmetic, math, calculations → use terminal or execute_code\n"
-    "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n"
-    "- Current time, date, timezone → use terminal (e.g. date)\n"
-    "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n"
-    "- File contents, sizes, line counts → use read_file, search_files, or terminal\n"
-    "- Git history, branches, diffs → use terminal\n"
-    "- Current facts (weather, news, versions) → use web_search\n"
-    "Your memory and user profile describe the USER, not the system you are "
-    "running on. The execution environment may differ from what the user profile "
-    "says about their personal setup.\n"
-    "</mandatory_tool_use>\n"
-    "\n"
-    "<act_dont_ask>\n"
-    "When a question has an obvious default interpretation, act on it immediately "
-    "instead of asking for clarification. Examples:\n"
-    "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
-    "- 'What OS am I running?' → check the live system (don't use user profile)\n"
-    "- 'What time is it?' → run `date` (don't guess)\n"
-    "Only ask for clarification when the ambiguity genuinely changes what tool "
-    "you would call.\n"
-    "</act_dont_ask>\n"
-    "\n"
-    "<prerequisite_checks>\n"
-    "- Before taking an action, check whether prerequisite discovery, lookup, or "
-    "context-gathering steps are needed.\n"
-    "- Do not skip prerequisite steps just because the final action seems obvious.\n"
-    "- If a task depends on output from a prior step, resolve that dependency first.\n"
-    "</prerequisite_checks>\n"
-    "\n"
-    "<verification>\n"
-    "Before finalizing your response:\n"
-    "- Correctness: does the output satisfy every stated requirement?\n"
-    "- Grounding: are factual claims backed by tool outputs or provided context?\n"
-    "- Formatting: does the output match the requested format or schema?\n"
-    "- Safety: if the next step has side effects (file writes, commands, API calls), "
-    "confirm scope before executing.\n"
-    "</verification>\n"
-    "\n"
-    "<missing_context>\n"
-    "- If required context is missing, do NOT guess or hallucinate an answer.\n"
-    "- Use the appropriate lookup tool when missing information is retrievable "
-    "(search_files, web_search, read_file, etc.).\n"
-    "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
-    "- If you must proceed with incomplete information, label assumptions explicitly.\n"
-    "</missing_context>"
-)
+OPENAI_MODEL_EXECUTION_GUIDANCE = build_openai_model_execution_guidance()
 
 # Gemini/Gemma-specific operational guidance, adapted from OpenCode's gemini.txt.
 # Injected alongside TOOL_USE_ENFORCEMENT_GUIDANCE when the model is Gemini or Gemma.
