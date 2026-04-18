@@ -711,6 +711,160 @@ show_manual_install_hint() {
     esac
 }
 
+git_output_indicates_corruption() {
+    case "$1" in
+        *"object file "*|*"fatal: bad object "*|*"cannot read existing object info "*|*"invalid index-pack output"*|*"fatal: loose object "*|*"fatal: packed object "*|*"object corrupt or missing"*)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
+quarantine_install_dir() {
+    local timestamp
+    local backup_dir
+    local counter
+
+    timestamp="$(date -u +%Y%m%d-%H%M%S)"
+    backup_dir="${INSTALL_DIR}.corrupt-${timestamp}"
+    counter=1
+
+    while [ -e "$backup_dir" ]; do
+        backup_dir="${INSTALL_DIR}.corrupt-${timestamp}-${counter}"
+        counter=$((counter + 1))
+    done
+
+    mv "$INSTALL_DIR" "$backup_dir"
+    log_warn "Moved the corrupted checkout to $backup_dir"
+    log_info "If you had local changes, they are still preserved there for manual recovery."
+}
+
+clone_fresh_repo() {
+    # Try SSH first (for private repo access), fall back to HTTPS.
+    # GIT_SSH_COMMAND disables interactive prompts and sets a short timeout
+    # so SSH fails fast instead of hanging when no key is configured.
+    log_info "Trying SSH clone..."
+    if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
+       git clone --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
+        log_success "Cloned via SSH"
+    else
+        rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial SSH clone
+        log_info "SSH failed, trying HTTPS..."
+        if git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
+            log_success "Cloned via HTTPS"
+        else
+            log_error "Failed to clone repository"
+            exit 1
+        fi
+    fi
+}
+
+update_existing_repo() {
+    local status_output=""
+    local autostash_ref=""
+    local cmd_output=""
+
+    cd "$INSTALL_DIR"
+
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        log_error "Directory exists but is not a git repository: $INSTALL_DIR"
+        return 1
+    fi
+
+    if ! git cat-file -e HEAD^{commit} >/dev/null 2>&1; then
+        log_warn "Existing checkout has unreadable git metadata."
+        return 2
+    fi
+
+    if ! status_output="$(git status --porcelain 2>&1)"; then
+        printf '%s\n' "$status_output"
+        if git_output_indicates_corruption "$status_output"; then
+            log_warn "Existing checkout appears corrupted."
+            return 2
+        fi
+        return 1
+    fi
+
+    if [ -n "$status_output" ]; then
+        local stash_name
+        stash_name="hermes-install-autostash-$(date -u +%Y%m%d-%H%M%S)"
+        log_info "Local changes detected, stashing before update..."
+        if ! cmd_output="$(git stash push --include-untracked -m "$stash_name" 2>&1)"; then
+            printf '%s\n' "$cmd_output"
+            if git_output_indicates_corruption "$cmd_output"; then
+                log_warn "Unable to stash because the checkout appears corrupted."
+                return 2
+            fi
+            return 1
+        fi
+        if ! autostash_ref="$(git rev-parse --verify refs/stash 2>/dev/null)"; then
+            log_error "Local changes were stashed, but the stash reference could not be resolved."
+            return 1
+        fi
+    fi
+
+    if ! cmd_output="$(git fetch origin 2>&1)"; then
+        printf '%s\n' "$cmd_output"
+        if git_output_indicates_corruption "$cmd_output"; then
+            log_warn "git fetch failed because the local repository metadata is corrupted."
+            return 2
+        fi
+        return 1
+    fi
+
+    if ! cmd_output="$(git checkout "$BRANCH" 2>&1)"; then
+        printf '%s\n' "$cmd_output"
+        return 1
+    fi
+
+    if ! cmd_output="$(git pull --ff-only origin "$BRANCH" 2>&1)"; then
+        printf '%s\n' "$cmd_output"
+        if git_output_indicates_corruption "$cmd_output"; then
+            log_warn "git pull failed because the local repository metadata is corrupted."
+            return 2
+        fi
+        return 1
+    fi
+
+    if [ -n "$autostash_ref" ]; then
+        local restore_now="no"
+        if [ -t 0 ] && [ -t 1 ]; then
+            echo
+            log_warn "Local changes were stashed before updating."
+            log_warn "Restoring them may reapply local customizations onto the updated codebase."
+            printf "Restore local changes now? [Y/n] "
+            read -r restore_answer
+            case "$restore_answer" in
+                ""|y|Y|yes|YES|Yes) restore_now="yes" ;;
+                *) restore_now="no" ;;
+            esac
+        else
+            log_info "Skipping automatic restore of local changes in non-interactive mode."
+            log_info "Your changes are still preserved in git stash."
+        fi
+
+        if [ "$restore_now" = "yes" ]; then
+            log_info "Restoring local changes..."
+            if git stash apply "$autostash_ref"; then
+                git stash drop "$autostash_ref" >/dev/null
+                log_warn "Local changes were restored on top of the updated codebase."
+                log_warn "Review git diff / git status if Hermes behaves unexpectedly."
+            else
+                log_error "Update succeeded, but restoring local changes failed. Your changes are still preserved in git stash."
+                log_info "Resolve manually with: git stash apply $autostash_ref"
+                return 1
+            fi
+        else
+            log_info "Skipped restoring local changes."
+            log_info "Your changes are still preserved in git stash."
+            log_info "Restore manually with: git stash apply $autostash_ref"
+        fi
+    fi
+
+    return 0
+}
+
 # ============================================================================
 # Installation
 # ============================================================================
@@ -721,53 +875,16 @@ clone_repo() {
     if [ -d "$INSTALL_DIR" ]; then
         if [ -d "$INSTALL_DIR/.git" ]; then
             log_info "Existing installation found, updating..."
-            cd "$INSTALL_DIR"
-
-            local autostash_ref=""
-            if [ -n "$(git status --porcelain)" ]; then
-                local stash_name
-                stash_name="hermes-install-autostash-$(date -u +%Y%m%d-%H%M%S)"
-                log_info "Local changes detected, stashing before update..."
-                git stash push --include-untracked -m "$stash_name"
-                autostash_ref="$(git rev-parse --verify refs/stash)"
-            fi
-
-            git fetch origin
-            git checkout "$BRANCH"
-            git pull --ff-only origin "$BRANCH"
-
-            if [ -n "$autostash_ref" ]; then
-                local restore_now="no"
-                if [ -t 0 ] && [ -t 1 ]; then
-                    echo
-                    log_warn "Local changes were stashed before updating."
-                    log_warn "Restoring them may reapply local customizations onto the updated codebase."
-                    printf "Restore local changes now? [Y/n] "
-                    read -r restore_answer
-                    case "$restore_answer" in
-                        ""|y|Y|yes|YES|Yes) restore_now="yes" ;;
-                        *) restore_now="no" ;;
-                    esac
+            if update_existing_repo; then
+                :
+            else
+                local update_status="$?"
+                if [ "$update_status" -eq 2 ]; then
+                    log_warn "Reinstalling from a fresh clone because the existing checkout is corrupted."
+                    quarantine_install_dir
+                    clone_fresh_repo
                 else
-                    log_info "Skipping automatic restore of local changes in non-interactive mode."
-                    log_info "Your changes are still preserved in git stash."
-                fi
-
-                if [ "$restore_now" = "yes" ]; then
-                    log_info "Restoring local changes..."
-                    if git stash apply "$autostash_ref"; then
-                        git stash drop "$autostash_ref" >/dev/null
-                        log_warn "Local changes were restored on top of the updated codebase."
-                        log_warn "Review git diff / git status if Hermes behaves unexpectedly."
-                    else
-                        log_error "Update succeeded, but restoring local changes failed. Your changes are still preserved in git stash."
-                        log_info "Resolve manually with: git stash apply $autostash_ref"
-                        exit 1
-                    fi
-                else
-                    log_info "Skipped restoring local changes."
-                    log_info "Your changes are still preserved in git stash."
-                    log_info "Restore manually with: git stash apply $autostash_ref"
+                    exit "$update_status"
                 fi
             fi
         else
@@ -776,23 +893,7 @@ clone_repo() {
             exit 1
         fi
     else
-        # Try SSH first (for private repo access), fall back to HTTPS
-        # GIT_SSH_COMMAND disables interactive prompts and sets a short timeout
-        # so SSH fails fast instead of hanging when no key is configured.
-        log_info "Trying SSH clone..."
-        if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
-           git clone --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
-            log_success "Cloned via SSH"
-        else
-            rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial SSH clone
-            log_info "SSH failed, trying HTTPS..."
-            if git clone --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
-                log_success "Cloned via HTTPS"
-            else
-                log_error "Failed to clone repository"
-                exit 1
-            fi
-        fi
+        clone_fresh_repo
     fi
 
     cd "$INSTALL_DIR"
