@@ -321,25 +321,52 @@ def _action_start(port: Optional[int]) -> Dict[str, Any]:
             }
 
     npx = _npx()
-    if not npx:
+    node = shutil.which("node")
+    if not node:
         return {
             "success": False,
             "action": "start",
-            "error": "npx not found in PATH. Install Node.js first.",
+            "error": "node not found in PATH. Install Node.js first.",
         }
+
+    # Resolve the package's actual entry point. The npm package
+    # @askjo/camofox-browser has NO `bin` field, so `npx <pkg>` fails. The
+    # right invocation is `node <pkgdir>/<main>` with cwd set to the package
+    # dir so relative requires/files resolve.
+    pkg_dir = _node_modules_dir() / "@askjo" / "camofox-browser"
+    pkg_json = pkg_dir / "package.json"
+    entry_script: Optional[str] = None
+    bin_entry: Optional[str] = None
+    try:
+        meta = json.loads(pkg_json.read_text(encoding="utf-8"))
+        bin_field = meta.get("bin")
+        if isinstance(bin_field, str):
+            bin_entry = bin_field
+        elif isinstance(bin_field, dict) and bin_field:
+            bin_entry = next(iter(bin_field.values()))
+        entry_script = meta.get("main") or "server.js"
+    except Exception:
+        entry_script = "server.js"
 
     use_port = port or DEFAULT_PORT
     log_path = _log_file()
     env = os.environ.copy()
     env["CAMOFOX_PORT"] = str(use_port)
+    env["PORT"] = str(use_port)  # some forks read PORT instead
 
     try:
         log_fh = open(log_path, "ab")
     except Exception as exc:
         return {"success": False, "action": "start", "error": f"Cannot open log file: {exc}"}
 
+    # Build argv: prefer bin (executable), fall back to main script.
+    if bin_entry:
+        cmd = [node, str((pkg_dir / bin_entry).resolve())]
+    else:
+        cmd = [node, str((pkg_dir / (entry_script or "server.js")).resolve())]
+
     popen_kwargs: Dict[str, Any] = {
-        "cwd": str(PROJECT_ROOT),
+        "cwd": str(pkg_dir),  # run FROM the package dir so its relative paths work
         "stdout": log_fh,
         "stderr": subprocess.STDOUT,
         "stdin": subprocess.DEVNULL,
@@ -354,10 +381,10 @@ def _action_start(port: Optional[int]) -> Dict[str, Any]:
         popen_kwargs["start_new_session"] = True  # detach from this process group
 
     try:
-        proc = subprocess.Popen([npx, NPM_PACKAGE], **popen_kwargs)
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except Exception as exc:
         log_fh.close()
-        return {"success": False, "action": "start", "error": f"Failed to spawn: {exc}"}
+        return {"success": False, "action": "start", "error": f"Failed to spawn: {exc}", "cmd": cmd}
 
     pid = proc.pid
     try:
@@ -390,13 +417,20 @@ def _action_start(port: Optional[int]) -> Dict[str, Any]:
         time.sleep(1.0)
 
     if not health:
+        tail = ""
+        try:
+            tail = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
+        except Exception:
+            pass
         return {
             "success": False,
             "action": "start",
             "error": "Camofox started but /health did not respond within 60s. It may still be downloading the Camoufox engine on first run; check logs and retry status in a minute.",
             "pid": pid,
             "url": new_url,
+            "cmd": cmd,
             "log_file": str(log_path),
+            "log_tail": tail,
         }
 
     # Persist + update in-process env
