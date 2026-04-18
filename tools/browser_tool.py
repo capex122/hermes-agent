@@ -170,6 +170,7 @@ DEFAULT_COMMAND_TIMEOUT = 30
 SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
 
 _BOT_DETECTION_PATTERNS = (
+    # Generic challenge / access denial
     "access denied",
     "access to this page has been denied",
     "bot detected",
@@ -178,7 +179,6 @@ _BOT_DETECTION_PATTERNS = (
     "human verification",
     "are you a robot",
     "captcha",
-    "cloudflare",
     "ddos protection",
     "checking your browser",
     "just a moment",
@@ -190,7 +190,97 @@ _BOT_DETECTION_PATTERNS = (
     "unusual traffic",
     "verify you are human",
     "press and hold",
+    "security check",
+    "enable javascript and cookies",
+    "enable javascript to continue",
+    "why do i have to complete a captcha",
+    "prove you are human",
+    "i am not a robot",
+    "not a robot",
+    # Cloudflare
+    "cloudflare",
+    "cf-ray",
+    "checking if the site connection is secure",
+    "performance & security by cloudflare",
+    "please wait while we check your browser",
+    "ray id",
+    # Akamai / Bot Manager
+    "akamai",
+    "_abck",
+    "ak_bmsc",
+    "akamai bot manager",
+    # PerimeterX / HUMAN
+    "perimeterx",
+    "px-captcha",
+    "pxreasonscore",
+    "_pxvid",
+    # DataDome
+    "datadome",
+    "dd_cookie",
+    # Incapsula / Imperva
+    "incapsula",
+    "_incap_ses",
+    "imperva",
+    "incap_ses",
+    # Arkose / FunCaptcha
+    "funcaptcha",
+    "arkose",
+    # Shape / F5
+    "shape security",
+    "f5 bot defense",
+    # hCaptcha
+    "hcaptcha",
+    # Generic Turnstile
+    "turnstile",
 )
+
+# ---------------------------------------------------------------------------
+# JS stealth patches injected after each navigation in local mode.
+# Masks the most common headless/bot fingerprint signals readable from JS.
+# NOTE: These are best-effort — they run after DOMContentLoaded so early
+# detection scripts may have already fired. For full stealth, use Camofox.
+# ---------------------------------------------------------------------------
+_STEALTH_JS = r"""
+(function() {
+    try {
+        // Hide navigator.webdriver
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
+    } catch(_) {}
+    try {
+        // Fake Chrome-like plugins list (headless normally has 0)
+        if (!navigator.plugins.length) {
+            const fake = [
+                { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+                { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+                { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+            ];
+            Object.defineProperty(navigator, 'plugins', { get: () => fake, configurable: true });
+        }
+    } catch(_) {}
+    try {
+        // Ensure at least one language is reported
+        if (!navigator.languages || !navigator.languages.length) {
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+        }
+    } catch(_) {}
+    try {
+        // Fake window.chrome (absent in headless)
+        if (!window.chrome) {
+            window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
+        }
+    } catch(_) {}
+    try {
+        // Conceal automation-related permissions query
+        const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+        if (originalQuery) {
+            window.navigator.permissions.query = (params) =>
+                params.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : originalQuery.call(window.navigator.permissions, params);
+        }
+    } catch(_) {}
+})();
+"""
 
 _BROWSER_SEARCH_ENGINES = (
     ("duckduckgo", "https://html.duckduckgo.com/html/?q={query}"),
@@ -1537,11 +1627,20 @@ def _build_fallback_urls(query: str) -> list[str]:
 
 
 def _google_search_guidance(url: str) -> str | None:
-    """Return guidance when browser_navigate is pointed at Google search pages."""
+    """Return guidance when browser_navigate is pointed at Google search pages.
+
+    Blocks the Google homepage and bare /search path (no query), but allows
+    direct Google search URLs that include a query string so they can be used
+    as last-resort fallbacks when other engines fail.
+    """
     parsed = _parse_browser_target_url(url)
     host = (parsed.hostname or "").lower()
     path = parsed.path or "/"
     if not _MAIN_GOOGLE_HOST_RE.fullmatch(host):
+        return None
+
+    # Allow google.com/search?q=... — useful as a last-resort fallback
+    if path == "/search" and parsed.query:
         return None
 
     if path in ("", "/", "/search"):
@@ -1780,6 +1879,14 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                     "Consider upgrading Browserbase plan for proxy support."
                 )
             response["stealth_features"] = active_features
+
+        # Apply stealth JS patches in local mode to mask headless fingerprints.
+        # Best-effort — silently ignored on failure or non-local backends.
+        if _is_local_backend():
+            try:
+                _run_browser_command(effective_task_id, "eval", [_STEALTH_JS], timeout=5)
+            except Exception:
+                pass
 
         # Auto-take a compact snapshot so the model can act immediately
         # without a separate browser_snapshot call.

@@ -275,6 +275,62 @@ class TestCamofoxEvalFix:
 # Bot-detection handling
 # ---------------------------------------------------------------------------
 
+class TestBotDetectionPatterns:
+
+    def test_cloudflare_patterns_detected(self):
+        import tools.browser_tool as bt
+        assert bt._detect_bot_detection_signal("Just a moment...") is not None
+        assert bt._detect_bot_detection_signal("", "Cloudflare Ray ID: 1234abc") is not None
+        assert bt._detect_bot_detection_signal("", "Checking if the site connection is secure") is not None
+        assert bt._detect_bot_detection_signal("", "Performance & security by Cloudflare") is not None
+
+    def test_captcha_provider_patterns_detected(self):
+        import tools.browser_tool as bt
+        assert bt._detect_bot_detection_signal("", "perimeterx challenge") is not None
+        assert bt._detect_bot_detection_signal("", "datadome cookie validation") is not None
+        assert bt._detect_bot_detection_signal("", "hcaptcha checkpoint") is not None
+        assert bt._detect_bot_detection_signal("", "funcaptcha required") is not None
+        assert bt._detect_bot_detection_signal("", "imperva bot detection") is not None
+        assert bt._detect_bot_detection_signal("", "incapsula session required") is not None
+
+    def test_generic_patterns_detected(self):
+        import tools.browser_tool as bt
+        assert bt._detect_bot_detection_signal("", "Enable JavaScript and cookies to continue") is not None
+        assert bt._detect_bot_detection_signal("", "prove you are human") is not None
+        assert bt._detect_bot_detection_signal("", "security check required") is not None
+
+    def test_stealth_js_constant_exists(self):
+        import tools.browser_tool as bt
+        assert hasattr(bt, "_STEALTH_JS")
+        js = bt._STEALTH_JS
+        assert "webdriver" in js
+        assert "navigator" in js
+        assert "window.chrome" in js
+
+
+class TestGoogleSearchGuard:
+
+    def test_google_homepage_blocked(self):
+        import json
+        import tools.browser_tool as bt
+        result = json.loads(bt.browser_navigate("https://www.google.com", task_id="test"))
+        assert result["success"] is False
+        assert result.get("discouraged_search_target") is True
+
+    def test_google_bare_search_blocked(self):
+        import json
+        import tools.browser_tool as bt
+        result = json.loads(bt.browser_navigate("https://www.google.com/search", task_id="test"))
+        assert result["success"] is False
+        assert result.get("discouraged_search_target") is True
+
+    def test_google_search_with_query_allowed(self):
+        """google.com/search?q=... must NOT be blocked — used as last-resort fallback."""
+        import tools.browser_tool as bt
+        guidance = bt._google_search_guidance("https://www.google.com/search?q=saudi+football")
+        assert guidance is None, "Search URL with query param should be allowed"
+
+
 class TestBotDetectionHandling:
 
     def test_navigate_returns_structured_failure_on_bot_detection_title(self):
@@ -287,6 +343,7 @@ class TestBotDetectionHandling:
                  "_run_browser_command",
                  side_effect=[
                      {"success": True, "data": {"title": "Just a moment...", "url": "https://example.com"}},
+                     {"success": True, "data": {"result": "undefined"}},  # stealth eval
                      {"success": True, "data": {"snapshot": "verification page", "refs": {}}},
                  ],
              ):
@@ -307,6 +364,7 @@ class TestBotDetectionHandling:
                  "_run_browser_command",
                  side_effect=[
                      {"success": True, "data": {"title": "Search Results", "url": "https://example.com"}},
+                     {"success": True, "data": {"result": "undefined"}},  # stealth eval
                      {"success": True, "data": {"snapshot": "Please verify you are human", "refs": {}}},
                  ],
              ):
