@@ -737,7 +737,7 @@ clone_repo() {
             git pull --ff-only origin "$BRANCH"
 
             if [ -n "$autostash_ref" ]; then
-                local restore_now="yes"
+                local restore_now="no"
                 if [ -t 0 ] && [ -t 1 ]; then
                     echo
                     log_warn "Local changes were stashed before updating."
@@ -748,6 +748,9 @@ clone_repo() {
                         ""|y|Y|yes|YES|Yes) restore_now="yes" ;;
                         *) restore_now="no" ;;
                     esac
+                else
+                    log_info "Skipping automatic restore of local changes in non-interactive mode."
+                    log_info "Your changes are still preserved in git stash."
                 fi
 
                 if [ "$restore_now" = "yes" ]; then
@@ -793,6 +796,12 @@ clone_repo() {
     fi
 
     cd "$INSTALL_DIR"
+
+    # Clear stale bytecode after updates so Python recompiles against the
+    # current source tree instead of importing cached modules from older code.
+    find "$INSTALL_DIR" \
+        \( -path "$INSTALL_DIR/venv" -o -path "$INSTALL_DIR/.venv" -o -path "$INSTALL_DIR/node_modules" -o -path "$INSTALL_DIR/.git" -o -path "$INSTALL_DIR/.worktrees" \) -prune \
+        -o -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 
     log_success "Repository ready"
 }
