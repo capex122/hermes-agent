@@ -132,6 +132,10 @@ class TestBrowserConsoleToolsetWiring:
         from model_tools import _LEGACY_TOOLSET_MAP
         assert "browser_console" in _LEGACY_TOOLSET_MAP["browser_tools"]
 
+    def test_browser_search_in_legacy_toolset_map(self):
+        from model_tools import _LEGACY_TOOLSET_MAP
+        assert "browser_search" in _LEGACY_TOOLSET_MAP["browser_tools"]
+
     def test_in_registry(self):
         from tools.registry import registry
         from tools import browser_tool  # noqa: F401

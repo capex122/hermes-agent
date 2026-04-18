@@ -731,6 +731,7 @@ class TestBuildSystemPrompt:
 
         assert "execute that search immediately: use browser_search" in prompt
         assert "use browser_navigate with browser_snapshot" in prompt
+        assert "continue to one or more of those result pages" in prompt
 
     def test_search_intent_guidance_prefers_terminal_for_simple_date_questions(self):
         with (

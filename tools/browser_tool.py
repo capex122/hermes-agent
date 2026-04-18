@@ -197,6 +197,45 @@ _BROWSER_SEARCH_ENGINES = (
     ("bing", "https://www.bing.com/search?q={query}"),
 )
 
+_SNAPSHOT_LINK_RE = re.compile(
+        r'^\s*-\s+link\s+"(?P<title>.+?)"\s+\[ref=(?P<ref>@?e[^\]]+)\]\s*$',
+        re.MULTILINE,
+)
+
+_BROWSER_SEARCH_RESULT_JS = r"""
+JSON.stringify((() => {
+    const selectors = [
+        'a.result__a',
+        'li.b_algo h2 a',
+        'h2 a',
+        '[data-testid="result-title-a"]',
+        'main a[href]',
+        '#links a[href]',
+    ];
+    const items = [];
+    const seen = new Set();
+    for (const selector of selectors) {
+        for (const anchor of document.querySelectorAll(selector)) {
+            const title = (anchor.innerText || anchor.textContent || '').replace(/\s+/g, ' ').trim();
+            const href = anchor.href || anchor.getAttribute('href') || '';
+            if (!title || !href) {
+                continue;
+            }
+            const key = `${title}|||${href}`;
+            if (seen.has(key)) {
+                continue;
+            }
+            seen.add(key);
+            items.push({ title, url: href });
+            if (items.length >= 12) {
+                return items;
+            }
+        }
+    }
+    return items;
+})())
+"""
+
 _MAIN_GOOGLE_HOST_RE = re.compile(r"^(?:www\.)?google\.[a-z.]+$", re.IGNORECASE)
 
 # Commands that legitimately return empty stdout (e.g. close, record).
@@ -1392,6 +1431,83 @@ def _count_snapshot_links(snapshot_text: str) -> int:
     return len(re.findall(r"(^|\n)\s*-\s+link\b", snapshot_text.lower()))
 
 
+def _normalize_search_result_url(engine: str, raw_url: str) -> str:
+    """Resolve engine redirect URLs into concrete source URLs when possible."""
+    candidate = (raw_url or "").strip()
+    if not candidate:
+        return ""
+    if candidate.startswith("//"):
+        candidate = f"https:{candidate}"
+    parsed = _parse_browser_target_url(candidate)
+
+    if engine == "duckduckgo" and parsed.hostname and parsed.hostname.endswith("duckduckgo.com"):
+        uddg = urllib.parse.parse_qs(parsed.query).get("uddg", [""])[0]
+        if uddg:
+            candidate = urllib.parse.unquote(uddg)
+            parsed = _parse_browser_target_url(candidate)
+
+    if parsed.scheme not in ("http", "https"):
+        return ""
+    return urllib.parse.urlunparse(parsed)
+
+
+def _extract_snapshot_clickable_results(snapshot_text: str, limit: int = 8) -> list[dict[str, str]]:
+    """Extract clickable link refs from the compact browser snapshot."""
+    results: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _SNAPSHOT_LINK_RE.finditer(snapshot_text or ""):
+        title = re.sub(r"\s+", " ", match.group("title")).strip()
+        ref = match.group("ref")
+        if not title or len(title) < 4:
+            continue
+        if not ref.startswith("@"):
+            ref = f"@{ref}"
+        key = (title.lower(), ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append({"title": title, "ref": ref})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _extract_search_source_results(engine: str, task_id: Optional[str] = None, limit: int = 8) -> tuple[list[dict[str, str]], Optional[str]]:
+    """Extract structured search result links from the current page DOM."""
+    eval_result = json.loads(_browser_eval(_BROWSER_SEARCH_RESULT_JS, task_id))
+    if not eval_result.get("success"):
+        return [], eval_result.get("error")
+
+    raw_items = eval_result.get("result")
+    if not isinstance(raw_items, list):
+        return [], None
+
+    engine_hosts = {
+        "duckduckgo": ("duckduckgo.com", "html.duckduckgo.com"),
+        "bing": ("bing.com", "www.bing.com"),
+    }.get(engine, ())
+
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        title = re.sub(r"\s+", " ", str(item.get("title") or "")).strip()
+        url = _normalize_search_result_url(engine, str(item.get("url") or ""))
+        if not title or not url:
+            continue
+        host = (_parse_browser_target_url(url).hostname or "").lower()
+        if any(host == engine_host or host.endswith(f".{engine_host}") for engine_host in engine_hosts):
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        results.append({"title": title, "url": url})
+        if len(results) >= limit:
+            break
+    return results, None
+
+
 def _browser_search_page_failure_reason(engine: str, result: dict[str, Any], query: str) -> str | None:
     """Return a reason when a browser search page is clearly unusable."""
     title = str(result.get("title") or "")
@@ -1599,6 +1715,17 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
     for engine, search_url in _build_browser_search_urls(normalized_query):
         result = json.loads(browser_navigate(search_url, task_id=task_id))
         unusable_reason = _browser_search_page_failure_reason(engine, result, normalized_query)
+        source_results: list[dict[str, str]] = []
+        clickable_results: list[dict[str, str]] = []
+
+        if result.get("success") and not unusable_reason:
+            source_results, eval_error = _extract_search_source_results(engine, task_id)
+            clickable_results = _extract_snapshot_clickable_results(str(result.get("snapshot") or ""))
+            if not source_results and not clickable_results:
+                unusable_reason = "search page did not expose actionable result links"
+            elif eval_error and not source_results:
+                result["result_extraction_warning"] = eval_error
+
         attempts.append(
             {
                 "engine": engine,
@@ -1613,6 +1740,15 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             result["search_engine"] = engine
             result["search_query"] = normalized_query
             result["search_url"] = search_url
+            if source_results:
+                result["source_results"] = source_results
+            if clickable_results:
+                result["clickable_results"] = clickable_results
+            result["results_count"] = max(len(source_results), len(clickable_results))
+            result["next_step_hint"] = (
+                "Use source_results URLs with browser_navigate or web_extract when available. "
+                "If only clickable_results are present, open one or more of those result refs with browser_click."
+            )
             if len(attempts) > 1:
                 result["attempted_engines"] = [attempt["engine"] for attempt in attempts]
             return json.dumps(result, ensure_ascii=False)

@@ -344,10 +344,14 @@ class TestBotDetectionHandling:
                     "success": True,
                     "url": "https://www.bing.com/search?q=saudi+clubs",
                     "title": "Bing results",
-                    "snapshot": "results page",
+                    "snapshot": '- link "Result one" [ref=e1]\n- link "Result two" [ref=e2]',
                 }),
             ],
-        ) as mock_navigate:
+        ) as mock_navigate, patch.object(
+            bt,
+            "_extract_search_source_results",
+            return_value=([{"title": "Result one", "url": "https://example.com/result-1"}], None),
+        ) as mock_extract:
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
         assert result["success"] is True
@@ -355,6 +359,8 @@ class TestBotDetectionHandling:
         assert result["search_query"] == "saudi clubs"
         assert result["attempted_engines"] == ["duckduckgo", "bing"]
         assert "html.duckduckgo.com/html/?q=saudi+clubs" in mock_navigate.call_args_list[0].args[0]
+        assert result["source_results"][0]["url"] == "https://example.com/result-1"
+        assert result["clickable_results"][0]["ref"] == "@e1"
 
     def test_browser_search_falls_back_when_first_page_is_search_landing_page(self):
         import json
@@ -377,6 +383,10 @@ class TestBotDetectionHandling:
                     "snapshot": '- link "Result one" [ref=e1]\n- link "Result two" [ref=e2]',
                 }),
             ],
+        ), patch.object(
+            bt,
+            "_extract_search_source_results",
+            side_effect=[([], None), ([{"title": "Result one", "url": "https://example.com/result-1"}], None)],
         ):
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
@@ -403,12 +413,45 @@ class TestBotDetectionHandling:
                     "error": "Bing blocked",
                 }),
             ],
+        ), patch.object(
+            bt,
+            "_extract_search_source_results",
+            return_value=([], None),
         ):
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
         assert result["success"] is False
         assert result["attempted_engines"] == ["duckduckgo", "bing"]
         assert "Last error: Bing blocked" in result["error"]
+
+    def test_browser_search_requires_actionable_results_before_success(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({
+                    "success": True,
+                    "url": "https://html.duckduckgo.com/html/?q=saudi+clubs",
+                    "title": "saudi clubs - Search",
+                    "snapshot": '- text "no links here"',
+                }),
+                json.dumps({
+                    "success": False,
+                    "error": "Bing blocked",
+                }),
+            ],
+        ), patch.object(
+            bt,
+            "_extract_search_source_results",
+            return_value=([], None),
+        ):
+            result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
+
+        assert result["success"] is False
+        assert result["attempted_engines"] == ["duckduckgo", "bing"]
 
     def test_browser_search_reports_all_attempted_engines_on_failure(self):
         import json

@@ -1084,6 +1084,7 @@ class TestSearchIntentGuidance:
         )
         assert "execute that search immediately: use browser_search" in text
         assert "use browser_navigate with browser_snapshot" in text
+        assert "continue to one or more of those result pages" in text
 
     def test_guidance_handles_browser_only_web_lookup(self):
         text = build_search_intent_guidance(

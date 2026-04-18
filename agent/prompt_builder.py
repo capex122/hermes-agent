@@ -344,6 +344,7 @@ def build_search_intent_guidance(
         "availability/configuration problem, do not stop there. Retry with a better query "
         "or another available web-capable tool in the same turn before saying you cannot "
         "search.\n"
+        "- If browser_search returns candidate result URLs or clickable result refs, continue to one or more of those result pages instead of stopping with a generic apology.\n"
         f"{deterministic_time_line}"
         "- If the user says 'search for ...' without mentioning files, the repo, the "
         "workspace, code, directories, or paths, default to a web search rather than a "
