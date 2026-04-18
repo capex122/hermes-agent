@@ -802,6 +802,12 @@ _BROWSER_SEARCH_ENGINES = (
     ("yahoo", "https://search.yahoo.com/search?p={query}"),
 )
 
+_BROWSER_IMAGE_SEARCH_ENGINES = (
+    ("commons", "https://commons.wikimedia.org/w/index.php?search={query}&title=Special:MediaSearch&go=Go&type=image"),
+    ("bing_images", "https://www.bing.com/images/search?q={query}"),
+    ("yahoo_images", "https://images.search.yahoo.com/search/images?p={query}"),
+)
+
 _SNAPSHOT_LINK_RE = re.compile(
         r'^\s*-\s+link\s+"(?P<title>.+?)"\s+\[ref=(?P<ref>@?e[^\]]+)\]\s*$',
         re.MULTILINE,
@@ -2198,9 +2204,14 @@ def _build_browser_search_urls(query: str) -> list[tuple[str, str]]:
     """Return preferred browser-search URLs for the given query."""
     normalized_query = " ".join((query or "").split())
     encoded_query = urllib.parse.quote_plus(normalized_query)
+    search_engines = (
+        _BROWSER_IMAGE_SEARCH_ENGINES
+        if _looks_like_image_search_query(normalized_query)
+        else _BROWSER_SEARCH_ENGINES
+    )
     return [
         (engine, template.format(query=encoded_query))
-        for engine, template in _BROWSER_SEARCH_ENGINES
+        for engine, template in search_engines
     ]
 
 
@@ -2215,12 +2226,37 @@ _NEWS_KEYWORDS = frozenset({
     "news", "latest", "current", "today", "yesterday", "recent", "happened",
     "announced", "reported", "update", "breaking",
 })
+_IMAGE_SEARCH_KEYWORDS = frozenset({
+    "image", "images", "photo", "photos", "picture", "pictures", "pic",
+    "pics", "wallpaper", "wallpapers", "poster", "posters", "gif", "gifs",
+    "meme", "memes", "logo", "logos", "icon", "icons", "headshot",
+    "headshots", "portrait", "portraits", "thumbnail", "thumbnails",
+})
+
+
+def _query_words(query: str) -> set[str]:
+    """Return lowercase alphanumeric tokens from the query."""
+    return set(re.findall(r"[a-z0-9]+", (query or "").lower()))
+
+
+def _looks_like_image_search_query(query: str) -> bool:
+    """Detect whether the query is explicitly asking for images/photos."""
+    return bool(_query_words(query) & _IMAGE_SEARCH_KEYWORDS)
 
 
 def _build_fallback_urls(query: str) -> list[str]:
     """Return direct navigation URLs matched to the query topic."""
-    words = set((query or "").lower().split())
-    encoded = urllib.parse.quote_plus(" ".join((query or "").split()))
+    normalized_query = " ".join((query or "").split())
+    words = _query_words(normalized_query)
+    encoded = urllib.parse.quote_plus(normalized_query)
+    if _looks_like_image_search_query(normalized_query):
+        hyphenated = urllib.parse.quote("-".join(part for part in normalized_query.split() if part))
+        return [
+            f"https://commons.wikimedia.org/w/index.php?search={encoded}&title=Special:MediaSearch&go=Go&type=image",
+            f"https://www.bing.com/images/search?q={encoded}",
+            f"https://images.search.yahoo.com/search/images?p={encoded}",
+            f"https://pixabay.com/images/search/{hyphenated}/",
+        ]
     if words & _SPORTS_KEYWORDS:
         saudi_specific = any(w in words for w in ("saudi", "sapl", "spl"))
         return [
@@ -2316,6 +2352,161 @@ def _attempt_browser_search_fallback_navigation(
             )
 
     return None, fallback_attempts
+
+
+def _normalize_non_browser_search_results(
+    results: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+) -> list[dict[str, str]]:
+    """Normalize external search results into title/url/description records."""
+    normalized_results: list[dict[str, str]] = []
+    for raw_result in results:
+        url = str(raw_result.get("url") or "").strip()
+        if not url:
+            continue
+        normalized_results.append(
+            {
+                "title": str(raw_result.get("title") or "").strip(),
+                "url": url,
+                "description": str(
+                    raw_result.get("description") or raw_result.get("snippet") or ""
+                ).strip(),
+            }
+        )
+        if len(normalized_results) >= limit:
+            break
+    return normalized_results
+
+
+def _run_non_browser_search_fallbacks(
+    query: str,
+    *,
+    limit: int = 10,
+) -> tuple[Optional[str], list[dict[str, str]]]:
+    """Try non-browser search fallbacks in priority order."""
+    try:
+        from tools.web_tools import web_search_tool
+
+        web_raw = web_search_tool(query, limit=limit)
+        web_payload = json.loads(web_raw)
+        web_results = _normalize_non_browser_search_results(
+            (web_payload.get("data") or {}).get("web") or [],
+            limit=limit,
+        )
+        if web_payload.get("success") and web_results:
+            return "web_search_fallback", web_results
+    except Exception as fallback_err:  # noqa: BLE001
+        logger.warning(
+            "browser search → web_search fallback failed: %s", str(fallback_err)[:200]
+        )
+
+    try:
+        from tools.webplus_tool import web_source_search_tool
+
+        source_raw = web_source_search_tool(query, limit=limit)
+        source_payload = json.loads(source_raw)
+        source_results = _normalize_non_browser_search_results(
+            (source_payload.get("data") or {}).get("web") or [],
+            limit=limit,
+        )
+        if source_payload.get("success") and source_results:
+            return "web_source_search_fallback", source_results
+    except Exception as fallback_err:  # noqa: BLE001
+        logger.warning(
+            "browser search → web_source_search fallback failed: %s", str(fallback_err)[:200]
+        )
+
+    return None, []
+
+
+def _site_name_from_url(url: str, fallback_name: str) -> str:
+    """Derive a concise site name from a URL for synthesis prompts."""
+    hostname = (urllib.parse.urlparse(url).hostname or "").replace("www.", "")
+    return hostname or fallback_name
+
+
+def _extract_browser_page_image_candidates(
+    task_id: Optional[str] = None,
+    *,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    """Extract likely useful page images for image-search queries."""
+    try:
+        image_payload = json.loads(browser_get_images(task_id=task_id))
+    except Exception:
+        return []
+
+    if not image_payload.get("success"):
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for image in image_payload.get("images") or []:
+        url = str(image.get("src") or image.get("url") or "").strip()
+        if not url or url in seen_urls or not url.startswith(("http://", "https://")):
+            continue
+
+        raw_width = image.get("width")
+        raw_height = image.get("height")
+        try:
+            width = int(raw_width) if raw_width not in (None, "") else 0
+        except (TypeError, ValueError):
+            width = 0
+        try:
+            height = int(raw_height) if raw_height not in (None, "") else 0
+        except (TypeError, ValueError):
+            height = 0
+
+        if width and height and (width < 120 or height < 120 or (width * height) < 30000):
+            continue
+
+        alt_text = str(image.get("alt") or "").strip()
+        low_signal = " ".join((url.lower(), alt_text.lower()))
+        if any(marker in low_signal for marker in ("sprite", "favicon", "emoji", "icon", "logo")):
+            if not width or not height or (width < 220 and height < 220):
+                continue
+
+        candidates.append(
+            {
+                "url": url,
+                "alt": alt_text,
+                "width": width,
+                "height": height,
+            }
+        )
+        seen_urls.add(url)
+        if len(candidates) >= limit:
+            break
+
+    return candidates
+
+
+def _augment_search_result_with_page_images(
+    result: dict[str, Any],
+    query: str,
+    *,
+    task_id: Optional[str] = None,
+) -> None:
+    """Attach extracted image candidates when the query explicitly asks for images."""
+    if not _looks_like_image_search_query(query):
+        return
+
+    image_results = _extract_browser_page_image_candidates(task_id=task_id)
+    if not image_results:
+        return
+
+    result["image_results"] = image_results
+    result["results_count"] = max(int(result.get("results_count") or 0), len(image_results))
+
+    image_hint = (
+        " If the user asked for an image, choose the best URL from image_results and "
+        "include it as markdown image syntax ![caption](url) so supported messaging "
+        "platforms can send it as native media."
+    )
+    existing_hint = str(result.get("next_step_hint") or "")
+    if image_hint.strip() not in existing_hint:
+        result["next_step_hint"] = f"{existing_hint}{image_hint}".strip()
 
 
 # ---------------------------------------------------------------------------
@@ -2779,6 +2970,7 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             "success": False,
             "error": "Search query cannot be empty",
         }, ensure_ascii=False)
+    image_query = _looks_like_image_search_query(normalized_query)
 
     # If the caller passed a URL as the "query", navigate to it directly.
     _lq = normalized_query.lower()
@@ -2808,7 +3000,8 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
         if result.get("success") and not unusable_reason:
             source_results, eval_error = _extract_search_source_results(engine, task_id)
             clickable_results = _extract_snapshot_clickable_results(str(result.get("snapshot") or ""))
-            if not source_results and not clickable_results:
+            _augment_search_result_with_page_images(result, normalized_query, task_id=task_id)
+            if not source_results and not clickable_results and not result.get("image_results"):
                 unusable_reason = "search page did not expose actionable result links"
             elif eval_error and not source_results:
                 result["result_extraction_warning"] = eval_error
@@ -2831,11 +3024,16 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
                 result["source_results"] = source_results
             if clickable_results:
                 result["clickable_results"] = clickable_results
-            result["results_count"] = max(len(source_results), len(clickable_results))
+            result["results_count"] = max(
+                len(source_results),
+                len(clickable_results),
+                len(result.get("image_results") or []),
+            )
             result["next_step_hint"] = (
                 "Use source_results URLs with browser_navigate or web_extract when available. "
                 "If only clickable_results are present, open one or more of those result refs with browser_click."
             )
+            _augment_search_result_with_page_images(result, normalized_query, task_id=task_id)
             if len(attempts) > 1:
                 result["attempted_engines"] = [attempt["engine"] for attempt in attempts]
             return json.dumps(result, ensure_ascii=False)
@@ -2846,8 +3044,19 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
     def _build_non_browser_fallback_success(
         *,
         search_engine: str,
-        results: list[dict[str, Any]],
+        results: list[dict[str, str]],
     ) -> str:
+        next_step_hint = (
+            "Browser search engines were unreachable; results came from a non-browser "
+            "search fallback. Use the URLs in source_results with browser_navigate or "
+            "web_fetch/web_extract when available."
+        )
+        if image_query:
+            next_step_hint += (
+                " Because the user asked for an image, open the most relevant source URL, "
+                "call browser_get_images on that page when available, and include the chosen "
+                "image URL as markdown image syntax ![caption](url)."
+            )
         return json.dumps(
             {
                 "success": True,
@@ -2861,77 +3070,52 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
                     if bot_blocked
                     else {}
                 ),
-                "source_results": [
-                    {
-                        "title": (r.get("title") or "").strip(),
-                        "url": (r.get("url") or "").strip(),
-                        "description": (r.get("description") or r.get("snippet") or "").strip(),
-                    }
-                    for r in results
-                    if (r.get("url") or "").strip()
-                ],
-                "results_count": len([r for r in results if (r.get("url") or "").strip()]),
-                "next_step_hint": (
-                    "Browser search engines were unreachable; results came from a non-browser "
-                    "search fallback. Use the URLs in source_results with browser_navigate or "
-                    "web_fetch/web_extract when available."
-                ),
+                "source_results": results,
+                "results_count": len(results),
+                "next_step_hint": next_step_hint,
             },
             ensure_ascii=False,
         )
 
-    # ── Auto-fallback to web_search ────────────────────────────────────────
-    # If every browser engine failed (network, bot detection, or empty results)
-    # transparently fall through to the configured web search backend(s).
-    # web_search has its own multi-backend fallback chain, so this gives the
-    # model real results instead of a useless error + a fragile "go navigate
-    # google.com" instruction that triggers _google_search_guidance.
-    try:
-        from tools.web_tools import web_search_tool
-
-        web_raw = web_search_tool(normalized_query, limit=10)
-        web_payload = json.loads(web_raw)
-        web_results = (web_payload.get("data") or {}).get("web") or []
-        if web_payload.get("success") and web_results:
-            return _build_non_browser_fallback_success(
-                search_engine="web_search_fallback",
-                results=web_results,
+    fallback_attempts: list[dict[str, str]] = []
+    if image_query:
+        direct_fallback_result, fallback_attempts = _attempt_browser_search_fallback_navigation(
+            query=normalized_query,
+            fallback_urls=fallback_urls,
+            task_id=task_id,
+            attempts=attempts,
+            bot_blocked=bot_blocked,
+        )
+        if direct_fallback_result:
+            _augment_search_result_with_page_images(
+                direct_fallback_result,
+                normalized_query,
+                task_id=task_id,
             )
-    except Exception as fallback_err:  # noqa: BLE001
-        logger.warning(
-            "browser_search → web_search fallback failed: %s", str(fallback_err)[:200]
+            return json.dumps(direct_fallback_result, ensure_ascii=False)
+
+    fallback_engine, fallback_results = _run_non_browser_search_fallbacks(normalized_query, limit=10)
+    if fallback_engine and fallback_results:
+        return _build_non_browser_fallback_success(
+            search_engine=fallback_engine,
+            results=fallback_results,
         )
 
-    # ── Auto-fallback to local source search ───────────────────────────────
-    # Some installs intentionally do not expose the legacy web_search tool,
-    # but do have the bundled/local source-search workflow available. Use it
-    # before giving up so browser_search can still produce results in a fully
-    # local/no-cloud setup.
-    try:
-        from tools.webplus_tool import web_source_search_tool
-
-        source_raw = web_source_search_tool(normalized_query, limit=10)
-        source_payload = json.loads(source_raw)
-        source_results = (source_payload.get("data") or {}).get("web") or []
-        if source_payload.get("success") and source_results:
-            return _build_non_browser_fallback_success(
-                search_engine="web_source_search_fallback",
-                results=source_results,
-            )
-    except Exception as fallback_err:  # noqa: BLE001
-        logger.warning(
-            "browser_search → web_source_search fallback failed: %s", str(fallback_err)[:200]
+    if not image_query:
+        direct_fallback_result, fallback_attempts = _attempt_browser_search_fallback_navigation(
+            query=normalized_query,
+            fallback_urls=fallback_urls,
+            task_id=task_id,
+            attempts=attempts,
+            bot_blocked=bot_blocked,
         )
-
-    direct_fallback_result, fallback_attempts = _attempt_browser_search_fallback_navigation(
-        query=normalized_query,
-        fallback_urls=fallback_urls,
-        task_id=task_id,
-        attempts=attempts,
-        bot_blocked=bot_blocked,
-    )
-    if direct_fallback_result:
-        return json.dumps(direct_fallback_result, ensure_ascii=False)
+        if direct_fallback_result:
+            _augment_search_result_with_page_images(
+                direct_fallback_result,
+                normalized_query,
+                task_id=task_id,
+            )
+            return json.dumps(direct_fallback_result, ensure_ascii=False)
 
     return json.dumps(
         {
@@ -3012,6 +3196,8 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
         if engine_name not in {n for n, _ in all_engines}:
             all_engines.append((engine_name, extra))
 
+    attempted_engines = [name for name, _ in all_engines]
+
     sources: list[dict[str, Any]] = []
     blocked_engines: list[str] = []
     for engine, url in all_engines:
@@ -3054,6 +3240,41 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
 
     if not sources:
         fallback_urls = _build_fallback_urls(normalized_query)
+        fallback_engine, fallback_results = _run_non_browser_search_fallbacks(
+            normalized_query,
+            limit=max(10, max_sites),
+        )
+        if fallback_engine and fallback_results:
+            fallback_sources = [
+                {
+                    "engine": _site_name_from_url(item["url"], fallback_engine),
+                    "url": item["url"],
+                    "title": item["title"],
+                    "snapshot_excerpt": item["description"][:1500],
+                    "links": [{"title": item["title"] or item["url"], "url": item["url"]}],
+                    "links_count": 1,
+                }
+                for item in fallback_results[:max_sites]
+            ]
+            site_names = list(dict.fromkeys(source["engine"] for source in fallback_sources))
+            return json.dumps({
+                "success": True,
+                "search_query": normalized_query,
+                "sources_count": len(fallback_sources),
+                "blocked_count": len(blocked_engines),
+                "blocked_engines": blocked_engines,
+                "browser_attempted_engines": attempted_engines,
+                "fallback_used": True,
+                "search_engine": fallback_engine,
+                "sources": fallback_sources,
+                "site_names": site_names,
+                "synthesis_instruction": (
+                    "These sources came from a non-browser search fallback after browser sites "
+                    "were blocked or failed. Synthesise all 'snapshot_excerpt' and 'links' "
+                    "fields above into a comprehensive answer for the user. At the end of your "
+                    f"response, list the sites you consulted: {', '.join(site_names)}."
+                ),
+            }, ensure_ascii=False)
         return json.dumps({
             "success": False,
             "error": f"All {len(all_engines)} sites were bot-blocked or failed.",

@@ -1094,11 +1094,12 @@ class TestSearchIntentGuidance:
         assert "check a sports website/app" in text
 
     def test_guidance_direct_nav_fallback_when_browser_search_fails(self):
-        """Prompt must tell model to do direct navigation when browser_search fails."""
+        """Prompt must tell model to inspect browser_search fallback fields before retrying."""
         text = build_search_intent_guidance({"browser_search", "browser_navigate"})
         assert "browser_navigate" in text
         assert "fallback_urls" in text
         assert "required_next_action" in text
+        assert "fallback_urls_already_attempted" in text
 
     def test_guidance_retries_lookup_before_giving_up(self):
         text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})
@@ -1150,6 +1151,14 @@ class TestSearchIntentGuidance:
         )
         assert "synthesise" in text.lower() or "synthesis" in text.lower()
         assert "site names" in text.lower() or "site_names" in text.lower() or "sites" in text.lower()
+
+    def test_guidance_mentions_markdown_image_syntax_for_image_results(self):
+        text = build_search_intent_guidance(
+            {"browser_search", "browser_get_images", "browser_navigate"}
+        )
+        assert "image_results" in text
+        assert "markdown image syntax" in text
+        assert "browser_get_images" in text
 
 
 # =========================================================================

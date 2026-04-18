@@ -810,6 +810,13 @@ class TestBotDetectionHandling:
         urls = bt._build_fallback_urls("latest news today")
         assert any("bbc.com/news" in u or "reuters" in u or "apnews" in u for u in urls)
 
+    def test_build_fallback_urls_returns_image_search_urls_for_image_query(self):
+        import tools.browser_tool as bt
+
+        urls = bt._build_fallback_urls("find 1 image for messi")
+        assert any("commons.wikimedia.org" in u for u in urls)
+        assert any("images/search" in u or "type=image" in u for u in urls)
+
     def test_browser_search_schema_description_mentions_fallback_urls(self):
         """Schema description must explain that fallback_urls are already attempted internally."""
         import tools.browser_tool as bt
@@ -977,6 +984,46 @@ class TestBotDetectionHandling:
         assert result["fallback_urls_already_attempted"] is True
         assert "already attempted the direct fallback URLs internally" in result["required_next_action"]
         assert "Do NOT manually call browser_navigate" in result["required_next_action"]
+
+    def test_browser_search_returns_image_results_for_image_query(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            return_value=json.dumps({
+                "success": True,
+                "url": "https://commons.wikimedia.org/w/index.php?search=messi&type=image",
+                "title": "Messi images",
+                "snapshot": "no clickable links here",
+            }),
+        ), patch.object(
+            bt,
+            "_extract_search_source_results",
+            return_value=([], None),
+        ), patch.object(
+            bt,
+            "browser_get_images",
+            return_value=json.dumps({
+                "success": True,
+                "images": [
+                    {
+                        "src": "https://upload.wikimedia.org/messi.jpg",
+                        "alt": "Lionel Messi",
+                        "width": 1200,
+                        "height": 800,
+                    }
+                ],
+                "count": 1,
+            }),
+        ):
+            result = json.loads(bt.browser_search("find 1 image for messi", task_id="test"))
+
+        assert result["success"] is True
+        assert result["image_results"][0]["url"] == "https://upload.wikimedia.org/messi.jpg"
+        assert result["results_count"] == 1
+        assert "markdown image syntax" in result["next_step_hint"]
 
 
 # ---------------------------------------------------------------------------
@@ -1262,6 +1309,36 @@ class TestBrowserMultiSearch:
         assert result["success"] is False
         assert "required_next_action" in result
         assert "fallback_urls" in result
+
+    def test_falls_back_to_non_browser_search_when_all_sites_blocked(self):
+        import json
+        import tools.browser_tool as bt
+
+        fake_source_results = json.dumps({
+            "success": True,
+            "data": {
+                "web": [
+                    {
+                        "title": "Messi latest match result",
+                        "url": "https://www.espn.com/soccer/report/_/gameId/123",
+                        "description": "Barcelona beat Example FC 2-1 with Messi scoring once.",
+                    }
+                ]
+            },
+        })
+
+        with patch.object(bt, "browser_navigate", return_value=self._make_fail_nav()), \
+             patch.object(bt, "cleanup_browser", return_value=None), \
+             patch("tools.web_tools.web_search_tool", return_value=json.dumps({"success": False, "error": "no backend configured"})), \
+             patch("tools.webplus_tool.web_source_search_tool", return_value=fake_source_results):
+            result = json.loads(bt.browser_multi_search("messi latest match today", max_sites=3, task_id="test"))
+
+        assert result["success"] is True
+        assert result["fallback_used"] is True
+        assert result["search_engine"] == "web_source_search_fallback"
+        assert result["sources_count"] == 1
+        assert result["sources"][0]["url"] == "https://www.espn.com/soccer/report/_/gameId/123"
+        assert "non-browser search fallback" in result["synthesis_instruction"]
 
     def test_schema_registered(self):
         from tools.browser_tool import _BROWSER_SCHEMA_MAP
