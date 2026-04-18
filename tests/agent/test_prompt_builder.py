@@ -640,18 +640,38 @@ class TestBuildContextFilesPrompt:
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Lowercase claude rules" in result
 
-    @pytest.mark.skipif(
-        sys.platform == "darwin",
-        reason="APFS default volume is case-insensitive; CLAUDE.md and claude.md alias the same path",
-    )
-    def test_claude_md_uppercase_takes_priority(self, tmp_path):
-        uppercase = tmp_path / "CLAUDE.md"
-        lowercase = tmp_path / "claude.md"
-        uppercase.write_text("From uppercase.")
-        lowercase.write_text("From lowercase.")
-        if uppercase.samefile(lowercase):
-            pytest.skip("filesystem is case-insensitive")
-        result = build_context_files_prompt(cwd=str(tmp_path))
+    def test_claude_md_uppercase_takes_priority(self, tmp_path, monkeypatch):
+        """Uppercase CLAUDE.md must win over lowercase claude.md.
+
+        On case-insensitive filesystems (Windows NTFS, macOS APFS default vol)
+        the two names alias the same inode, so we cannot create both on disk.
+        Instead, intercept reads on the cwd directory so uppercase and
+        lowercase return different content while both report as existing —
+        the function must pick the uppercase one first.
+        """
+        from pathlib import Path as _Path
+        from agent import prompt_builder as _pb
+
+        real_exists = _Path.exists
+        real_read_text = _Path.read_text
+        cwd_str = str(tmp_path)
+
+        def fake_exists(self):
+            if str(self.parent) == cwd_str and self.name in ("CLAUDE.md", "claude.md"):
+                return True
+            return real_exists(self)
+
+        def fake_read_text(self, *a, **kw):
+            if str(self.parent) == cwd_str and self.name == "CLAUDE.md":
+                return "From uppercase."
+            if str(self.parent) == cwd_str and self.name == "claude.md":
+                return "From lowercase."
+            return real_read_text(self, *a, **kw)
+
+        monkeypatch.setattr(_Path, "exists", fake_exists)
+        monkeypatch.setattr(_Path, "read_text", fake_read_text)
+
+        result = _pb.build_context_files_prompt(cwd=cwd_str)
         assert "From uppercase" in result
         assert "From lowercase" not in result
 

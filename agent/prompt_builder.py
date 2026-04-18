@@ -600,6 +600,96 @@ def build_browser_search_playbook(
 # and cross-tool playbooks for non-obvious tools.
 # ---------------------------------------------------------------------------
 
+MCP_SELF_EXTENSION_GUIDANCE = (
+    "# Self-extension via MCP server creation (READ THIS BEFORE YOU SAY \"I CAN'T\")\n"
+    "You have `mcp_create_server`. This means: when a user asks for a capability you "
+    "do not currently have, the correct response is NOT \"I cannot do that\" — the "
+    "correct response is to BUILD that capability as a new MCP server and then use "
+    "it. Treat this as a first-class tool, not an exotic edge case.\n"
+    "\n"
+    "## What it actually writes (this is NOT modifying Hermes source)\n"
+    "Every server you create lives entirely under the user's data dir:\n"
+    "  - `$HERMES_HOME/mcp_servers/<name>/server.py`         (the new tool's code)\n"
+    "  - `$HERMES_HOME/mcp_servers/<name>/requirements.txt`  (optional pip deps)\n"
+    "  - `$HERMES_HOME/config.yaml` gains `mcp_servers.<name>: {...}`\n"
+    "Hermes' own source tree is NEVER touched. You are not patching Hermes — you are "
+    "dropping a plugin into the official extension dir. The whole purpose of MCP is "
+    "to let you grow new tools without editing the agent's own files. So when you "
+    "feel the reflex \"I shouldn't modify my own code,\" notice it, and then call "
+    "`mcp_create_server` anyway: it is the safe, sanctioned, sandboxed path.\n"
+    "\n"
+    "## When to invoke it (proactively, without asking)\n"
+    "- The user asks for a capability that no existing tool covers (e.g. 'check BTC "
+    "price every minute', 'wrap this private REST API', 'add a tool that converts "
+    "X to Y', 'monitor this RSS feed').\n"
+    "- You catch yourself running the same 3+ step terminal/code workflow more than "
+    "twice — wrap it so next time it is one call.\n"
+    "- Integration with any service that has a Python SDK or simple REST API "
+    "(Stripe, GitHub, Notion, Linear, OpenWeather, internal APIs) — generate a tiny "
+    "wrapper MCP server.\n"
+    "- The user says \"can you ____\" and the honest answer is no with current tools "
+    "but yes if you spent 30 seconds writing one.\n"
+    "Do NOT ask for permission first when intent is clear. Build, register, call, "
+    "report back with results.\n"
+    "\n"
+    "## How to call it\n"
+    "1. Short snake_case `name` (e.g. `btc_price`, `linear_issues`).\n"
+    "2. `tools` = list of `{name, description, input_schema, code}` entries. Each "
+    "`code` is the Python BODY of the handler. `arguments` is a dict. `TextContent` "
+    "is already imported. The body MUST `return [TextContent(type='text', text=...)]`.\n"
+    "3. `requirements` = optional list of pip packages (e.g. `['httpx']`). They are "
+    "written to requirements.txt; you must `pip install -r` them yourself via "
+    "`terminal` if the server needs them at runtime.\n"
+    "4. Leave `register_now=True` (default) so the tool is live in THIS session — no "
+    "restart needed. The new callable is named `mcp_<server_name>_<tool_name>`.\n"
+    "5. To iterate on a server you already created (typo, bug, missing field), call "
+    "`mcp_create_server` again with the SAME name and `overwrite=True`. The file is "
+    "rewritten and the tool re-registered. This is how you debug — write, test, "
+    "overwrite, test again. Do NOT try to edit the generated server file with "
+    "`patch_file`/`write_file` while the server is running; use `overwrite=True`.\n"
+    "6. If registration reports `\"MCP SDK not installed\"`, install it once with "
+    "`terminal` (`pip install mcp`) then call again with the same args.\n"
+    "\n"
+    "## Minimal example skeleton (copy this shape)\n"
+    "```\n"
+    "mcp_create_server(\n"
+    "  name='btc_price',\n"
+    "  description='Live BTC spot price from a public API.',\n"
+    "  tools=[{\n"
+    "    'name': 'get_price',\n"
+    "    'description': 'Return current BTC/USD spot price.',\n"
+    "    'input_schema': {'type': 'object', 'properties': {}},\n"
+    "    'code': (\n"
+    "      'import urllib.request, json\\n'\n"
+    "      'r = urllib.request.urlopen(\"https://api.coinbase.com/v2/prices/BTC-USD/spot\", timeout=10)\\n'\n"
+    "      'data = json.loads(r.read())\\n'\n"
+    "      'return [TextContent(type=\"text\", text=json.dumps(data[\"data\"]))]\\n'\n"
+    "    ),\n"
+    "  }],\n"
+    "  register_now=True,\n"
+    ")\n"
+    "```\n"
+    "After success the tool `mcp_btc_price_get_price` is callable immediately.\n"
+    "\n"
+    "## What to do when something is wrong\n"
+    "- Server registers but tool errors at call time → fix the `code` body, call "
+    "`mcp_create_server` again with `overwrite=True`.\n"
+    "- Need a new dependency mid-iteration → add to `requirements`, overwrite, then "
+    "`pip install -r $HERMES_HOME/mcp_servers/<name>/requirements.txt` via terminal.\n"
+    "- The owner has gated MCP creation off → the call returns an error mentioning "
+    "`HERMES_DISABLE_MCP_CREATE`. Tell the user; do not try to bypass.\n"
+    "\n"
+    "## Anti-patterns (don't do these)\n"
+    "- Saying \"I can't do that\" when `mcp_create_server` is in your toolset.\n"
+    "- Asking permission before creating an obviously-needed tool.\n"
+    "- Trying to patch Hermes' own source files in the workspace as a substitute "
+    "for an MCP server. Hermes source is read-only territory; MCP servers are the "
+    "extension point.\n"
+    "- Hand-editing files in `$HERMES_HOME/mcp_servers/<name>/` while the server "
+    "is registered — use `overwrite=True` so registration stays in sync."
+)
+
+
 def build_advanced_capabilities_guidance(
     available_tools: Optional[set[str] | list[str]] = None,
 ) -> str:
@@ -646,153 +736,7 @@ def build_advanced_capabilities_guidance(
 
     # ── MCP self-extension ───────────────────────────────────────────────
     if "mcp_create_server" in available:
-        sections.append(
-            "# Self-extension via MCP server creation\n"
-            "You have `mcp_create_server` enabled — you can give yourself NEW tools on "
-            "demand by writing a Python MCP server. Use this proactively when:\n"
-            "- The user asks for a capability that isn't covered by an existing tool "
-            "(e.g. 'check the price of BTC every minute', 'wrap this private API', "
-            "'add a tool that converts X to Y').\n"
-            "- You catch yourself running the same multi-step terminal/code workflow "
-            "more than twice — wrap it in an MCP tool so it's a single call next time.\n"
-            "- The user asks you to integrate with a service that has a Python SDK or "
-            "a simple REST API (Stripe, GitHub, Notion, Linear, custom internal APIs, "
-            "etc.) — generate a tiny MCP server that exposes the operations they need.\n"
-            "How to use it:\n"
-            "1. Pick a short snake-case name (e.g. `btc_price`, `linear_issues`).\n"
-            "2. Define `tools` as a list of `{name, description, input_schema, code}`. "
-            "Each `code` block is the Python BODY of the handler — `arguments` is a dict, "
-            "`TextContent` is already imported, and you must `return [TextContent(type='text', text=...)]`.\n"
-            "3. Add `requirements` if you need pip packages (e.g. `['requests', 'httpx']`).\n"
-            "4. Leave `register_now=True` so the tool is callable in this same session.\n"
-            "5. After the call returns success, the new tool is named "
-            "`mcp_<server_name>_<tool_name>` and you can call it immediately.\n"
-            "Don't ask permission to create an MCP server when the user has clearly "
-            "asked for a missing capability — just create it, register it, and call it."
-        )
-
-    # ── Code execution sandbox ───────────────────────────────────────────
-    if "execute_code" in available:
-        sections.append(
-            "# Code execution sandbox\n"
-            "`execute_code` runs Python in an isolated sandbox with the standard library "
-            "available. Prefer it over `terminal` when you need to:\n"
-            "- Crunch numbers, parse JSON/CSV, or transform structured data programmatically.\n"
-            "- Run quick algorithmic experiments without polluting the user's shell.\n"
-            "- Test a snippet before pasting it into a file.\n"
-            "Use `terminal` instead when you need shell tools, package managers, git, the "
-            "user's installed CLIs, or persistence between calls."
-        )
-
-    # ── Delegation ───────────────────────────────────────────────────────
-    if "delegate_task" in available:
-        sections.append(
-            "# Delegating to subagents\n"
-            "`delegate_task` spawns a fresh agent with its own context window for one "
-            "well-scoped subtask, then returns a single summary. Use it for:\n"
-            "- Heavy exploration / multi-file reading where you don't need the raw "
-            "results in your context (e.g. 'find every place that calls foo and tell me "
-            "the call sites').\n"
-            "- Independent parallel work — fan out several `delegate_task` calls when "
-            "subtasks don't depend on each other.\n"
-            "Do NOT delegate trivial single-step actions or anything that requires "
-            "follow-up tool calls in the parent context."
-        )
-
-    # ── Cross-platform messaging with media ──────────────────────────────
-    if "send_message" in available:
-        sections.append(
-            "# Sending messages and media to other platforms\n"
-            "`send_message(target='telegram', message='...')` sends to the configured "
-            "HOME channel for that platform — token + chat ID come from the gateway "
-            "config automatically. Do NOT ask for a chat ID when the user says 'send to "
-            "telegram/discord/slack'; just call with the platform name.\n"
-            "To deliver an image/photo/video natively, embed it in `message` as "
-            "`![caption](https://example.com/file.jpg)` (markdown) or "
-            "`MEDIA:https://example.com/file.jpg` (legacy). Remote URLs are passed "
-            "through to the platform's native send_photo/send_video/send_document — no "
-            "local download required. Direct image-file URLs (e.g. from "
-            "`browser_search` `image_results[i].url`) work; webpage URLs do not."
-        )
-
-    return "\n\n".join(sections)
-
-
-# ---------------------------------------------------------------------------
-# Advanced capabilities guidance — fingerprint rotation, MCP self-extension,
-# and cross-tool playbooks for non-obvious tools.
-# ---------------------------------------------------------------------------
-
-def build_advanced_capabilities_guidance(
-    available_tools: Optional[set[str] | list[str]] = None,
-) -> str:
-    """Detailed how-to instructions for the agent's most powerful but easily
-    missed capabilities: browser fingerprint pinning, MCP self-extension,
-    cross-platform messaging with media, code execution, and delegation.
-
-    Each section is gated on the relevant tool actually being available in
-    the current toolset, so non-browser/non-MCP surfaces don't pay the
-    prompt-cost for guidance they can't act on.
-    """
-    if available_tools is None:
-        available = set()
-    else:
-        available = set(available_tools)
-
-    sections: list[str] = []
-
-    # ── Browser fingerprint rotation (anti-bot) ──────────────────────────
-    if available & {"browser_search", "browser_multi_search", "browser_navigate"}:
-        sections.append(
-            "# Anti-bot fingerprint rotation\n"
-            "All three browser tools (`browser_navigate`, `browser_search`, "
-            "`browser_multi_search`) accept an optional `fingerprint_seed` integer that "
-            "pins a deterministic browser persona — User-Agent, platform, viewport, "
-            "timezone, hardware concurrency, GPU vendor/renderer. The seed indexes a "
-            "pool of consistent profiles (`seed % pool_size`).\n"
-            "Use it like this:\n"
-            "- DEFAULT BEHAVIOUR (omit `fingerprint_seed`): each session gets a random "
-            "jittered profile. This is fine for most queries.\n"
-            "- WHEN A SITE BLOCKS YOU REPEATEDLY: retry the SAME query/URL with an "
-            "explicit `fingerprint_seed` and a different value than last time. Try the "
-            "sequence 0, 2, 3, 5, 6, 7 to cycle through Windows-Chrome, Mac-Chrome, "
-            "Mac-Safari, Linux-Chrome, Windows-Edge, Mac-Chrome-other personas.\n"
-            "- FOR `browser_multi_search`: passing `fingerprint_seed=N` makes site `i` "
-            "use seed `N+i`, so all sites get distinct deterministic personas. Useful "
-            "for reproducible runs or to escape correlated blocking.\n"
-            "- DO NOT keep retrying the same seed against the same blocked site — that "
-            "reuses the exact same persona. Switching seeds is the whole point.\n"
-            "- The seed sticks to the session: once you set one for `browser_navigate`, "
-            "subsequent calls within that session inherit it until you pass a different "
-            "seed or the session is reset."
-        )
-
-    # ── MCP self-extension ───────────────────────────────────────────────
-    if "mcp_create_server" in available:
-        sections.append(
-            "# Self-extension via MCP server creation\n"
-            "You have `mcp_create_server` enabled — you can give yourself NEW tools on "
-            "demand by writing a Python MCP server. Use this proactively when:\n"
-            "- The user asks for a capability that isn't covered by an existing tool "
-            "(e.g. 'check the price of BTC every minute', 'wrap this private API', "
-            "'add a tool that converts X to Y').\n"
-            "- You catch yourself running the same multi-step terminal/code workflow "
-            "more than twice — wrap it in an MCP tool so it's a single call next time.\n"
-            "- The user asks you to integrate with a service that has a Python SDK or "
-            "a simple REST API (Stripe, GitHub, Notion, Linear, custom internal APIs, "
-            "etc.) — generate a tiny MCP server that exposes the operations they need.\n"
-            "How to use it:\n"
-            "1. Pick a short snake-case name (e.g. `btc_price`, `linear_issues`).\n"
-            "2. Define `tools` as a list of `{name, description, input_schema, code}`. "
-            "Each `code` block is the Python BODY of the handler — `arguments` is a dict, "
-            "`TextContent` is already imported, and you must `return [TextContent(type='text', text=...)]`.\n"
-            "3. Add `requirements` if you need pip packages (e.g. `['requests', 'httpx']`).\n"
-            "4. Leave `register_now=True` so the tool is callable in this same session.\n"
-            "5. After the call returns success, the new tool is named "
-            "`mcp_<server_name>_<tool_name>` and you can call it immediately.\n"
-            "Don't ask permission to create an MCP server when the user has clearly "
-            "asked for a missing capability — just create it, register it, and call it."
-        )
+        sections.append(MCP_SELF_EXTENSION_GUIDANCE)
 
     # ── Code execution sandbox ───────────────────────────────────────────
     if "execute_code" in available:
