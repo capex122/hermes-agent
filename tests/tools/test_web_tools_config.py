@@ -324,6 +324,12 @@ class TestBackendSelection:
         with patch("tools.web_tools._load_web_config", return_value={"backend": "Tavily"}):
             assert _get_backend() == "tavily"
 
+    def test_config_bundled(self):
+        """web.backend=bundled in config → 'bundled'."""
+        from tools.web_tools import _get_backend
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "bundled"}):
+            assert _get_backend() == "bundled"
+
     # ── Fallback (no web.backend in config) ───────────────────────────
 
     def test_fallback_parallel_only_key(self):
@@ -571,6 +577,18 @@ class TestCheckWebApiKey:
                 with patch.dict(os.environ, {"FIRECRAWL_GATEWAY_URL": "http://127.0.0.1:3002"}, clear=False):
                     from tools.web_tools import check_web_api_key
                     assert check_web_api_key() is True
+
+    def test_configured_bundled_backend_uses_bundled_availability(self):
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "bundled"}):
+            with patch("tools.web_tools.bundled_backend_is_available", return_value=True):
+                from tools.web_tools import check_web_api_key
+                assert check_web_api_key() is True
+
+    def test_configured_bundled_backend_false_when_disabled(self):
+        with patch("tools.web_tools._load_web_config", return_value={"backend": "bundled"}):
+            with patch("tools.web_tools.bundled_backend_is_available", return_value=False):
+                from tools.web_tools import check_web_api_key
+                assert check_web_api_key() is False
 
 
 def test_web_requires_env_includes_exa_key():

@@ -425,6 +425,19 @@ DEFAULT_CONFIG = {
         },
     },
 
+    "web": {
+        "backend": "",          # empty = auto-detect from configured providers
+        "use_gateway": False,
+        "bundled": {
+            "enabled": False,                      # Use the Hermes-managed local web backend/toolset
+            "base_url": "http://127.0.0.1:8765",  # Local bundled backend base URL
+            "auto_start": True,                   # Start the local bundled backend automatically on demand
+            "timeout": 45,
+            "fallback_to_local": True,            # Fall back to local in-process search/extract when service calls fail
+            "max_local_chars": 20000,
+        },
+    },
+
     # Filesystem checkpoints — automatic snapshots before destructive file ops.
     # When enabled, the agent takes a snapshot of the working directory once per
     # conversation turn (on first write_file/patch call).  Use /rollback to restore.
@@ -755,7 +768,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 18,
+    "_config_version": 19,
 }
 
 # =============================================================================

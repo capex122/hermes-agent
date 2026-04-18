@@ -244,6 +244,13 @@ TOOL_CATEGORIES = {
                     {"key": "FIRECRAWL_API_URL", "prompt": "Your Firecrawl instance URL (e.g., http://localhost:3002)"},
                 ],
             },
+            {
+                "name": "Bundled Local Web Backend",
+                "badge": "preview · free",
+                "tag": "Hermes-managed local service with local search/fetch fallbacks",
+                "web_backend": "bundled",
+                "env_vars": [],
+            },
         ],
     },
     "image_gen": {
@@ -1086,6 +1093,8 @@ def _configure_provider(provider: dict, config: dict):
         web_cfg = config.setdefault("web", {})
         web_cfg["backend"] = provider["web_backend"]
         web_cfg["use_gateway"] = bool(managed_feature)
+        bundled_cfg = web_cfg.setdefault("bundled", {})
+        bundled_cfg["enabled"] = provider["web_backend"] == "bundled"
         _print_success(f"  Web backend set to: {provider['web_backend']}")
 
     # For tools without a specific config key (e.g. image_gen), still
@@ -1312,7 +1321,10 @@ def _reconfigure_provider(provider: dict, config: dict):
 
     # Set web search backend in config if applicable
     if provider.get("web_backend"):
-        config.setdefault("web", {})["backend"] = provider["web_backend"]
+        web_cfg = config.setdefault("web", {})
+        web_cfg["backend"] = provider["web_backend"]
+        bundled_cfg = web_cfg.setdefault("bundled", {})
+        bundled_cfg["enabled"] = provider["web_backend"] == "bundled"
         _print_success(f"  Web backend set to: {provider['web_backend']}")
 
     if not env_vars:

@@ -41,6 +41,16 @@ class TestResolveToolset:
         tools = resolve_toolset("web")
         assert set(tools) == {"web_search", "web_extract"}
 
+    def test_webplus_composes_web_and_browser(self):
+        tools = resolve_toolset("webplus")
+        assert "web_fetch" in tools
+        assert "web_deep_search" in tools
+        assert "youtube_search" in tools
+        assert "youtube_transcript" in tools
+        assert "web_inspect" in tools
+        assert "web_search" in tools
+        assert "browser_console" in tools
+
     def test_composite_toolset(self):
         tools = resolve_toolset("debugging")
         assert "terminal" in tools

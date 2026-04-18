@@ -61,6 +61,11 @@ from tools.managed_tool_gateway import (
 )
 from tools.tool_backend_helpers import managed_nous_tools_enabled, prefers_gateway
 from tools.url_safety import is_safe_url
+from tools.webplus_backend import (
+    bundled_backend_is_available,
+    bundled_web_extract,
+    bundled_web_search,
+)
 from tools.website_policy import check_website_access
 
 logger = logging.getLogger(__name__)
@@ -88,7 +93,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in ("parallel", "firecrawl", "tavily", "exa"):
+    if configured in ("parallel", "firecrawl", "tavily", "exa", "bundled"):
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -109,6 +114,8 @@ def _get_backend() -> str:
 
 def _is_backend_available(backend: str) -> bool:
     """Return True when the selected backend is currently usable."""
+    if backend == "bundled":
+        return bundled_backend_is_available()
     if backend == "exa":
         return _has_env("EXA_API_KEY")
     if backend == "parallel":
@@ -189,6 +196,8 @@ def _web_requires_env() -> list[str]:
         "TAVILY_API_KEY",
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL",
+        "HERMES_BUNDLED_WEB_URL",
+        "HERMES_BUNDLED_WEB_TIMEOUT",
     ]
     if managed_nous_tools_enabled():
         requires.extend(
@@ -1084,6 +1093,15 @@ def web_search_tool(query: str, limit: int = 5) -> str:
 
         # Dispatch to the configured backend
         backend = _get_backend()
+        if backend == "bundled":
+            response_data = bundled_web_search(query, limit=limit)
+            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+            debug_call_data["final_response_size"] = len(result_json)
+            _debug.log_call("web_search_tool", debug_call_data)
+            _debug.save()
+            return result_json
+
         if backend == "parallel":
             response_data = _parallel_search(query, limit)
             debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
@@ -1241,7 +1259,9 @@ async def web_extract_tool(
         else:
             backend = _get_backend()
 
-            if backend == "parallel":
+            if backend == "bundled":
+                results = await bundled_web_extract(safe_urls)
+            elif backend == "parallel":
                 results = await _parallel_extract(safe_urls)
             elif backend == "exa":
                 results = _exa_extract(safe_urls)
@@ -1922,7 +1942,7 @@ def check_firecrawl_api_key() -> bool:
 def check_web_api_key() -> bool:
     """Check whether the configured web backend is available."""
     configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in ("exa", "parallel", "firecrawl", "tavily"):
+    if configured in ("exa", "parallel", "firecrawl", "tavily", "bundled"):
         return _is_backend_available(configured)
     return any(_is_backend_available(backend) for backend in ("exa", "parallel", "firecrawl", "tavily"))
 

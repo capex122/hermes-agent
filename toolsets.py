@@ -119,6 +119,16 @@ TOOLSETS = {
         ],
         "includes": []
     },
+
+    "webplus": {
+        "description": "Bundled/local web research toolkit with fetch, deep search, YouTube helpers, and browser inspection",
+        "tools": [
+            "web_fetch", "web_deep_search",
+            "youtube_search", "youtube_transcript",
+            "web_inspect"
+        ],
+        "includes": ["web", "browser"]
+    },
     
     "cronjob": {
         "description": "Cronjob management tool - create, list, update, pause, resume, remove, and trigger scheduled tasks",
