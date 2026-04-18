@@ -89,6 +89,27 @@ class TestFindAgentBrowserCache:
         with pytest.raises(FileNotFoundError, match="cached"):
             bt._find_agent_browser()
 
+    def test_windows_prefers_local_cmd_shim(self):
+        import tools.browser_tool as bt
+        from pathlib import Path
+
+        original_exists = Path.exists
+
+        def mock_exists(self):
+            p = str(self).replace("\\", "/")
+            if p.endswith("/node_modules/.bin/agent-browser.cmd"):
+                return True
+            if p.endswith("/node_modules/.bin/agent-browser"):
+                return True
+            return original_exists(self)
+
+        with patch("shutil.which", return_value=None), \
+             patch("tools.browser_tool.os.name", "nt"), \
+             patch.object(Path, "exists", mock_exists):
+            result = bt._find_agent_browser()
+
+        assert result.replace("\\", "/").endswith("/node_modules/.bin/agent-browser.cmd")
+
 
 # ---------------------------------------------------------------------------
 # Caching: _get_command_timeout
@@ -355,6 +376,9 @@ class TestBotDetectionHandling:
         assert result["bot_detection_detected"] is True
         assert result["challenge_pattern"] == "just a moment"
         assert "terminal/execute_code" in result["error"]
+        assert result["blocked_page_content_available"] is False
+        assert result["content_from_blocked_page_must_not_be_used"] is True
+        assert "snapshot" not in result
 
     def test_navigate_returns_structured_failure_on_bot_detection_snapshot(self):
         import json
@@ -377,7 +401,36 @@ class TestBotDetectionHandling:
         assert result["success"] is False
         assert result["bot_detection_detected"] is True
         assert result["challenge_pattern"] == "verify you are human"
-        assert result["snapshot"] == "Please verify you are human"
+        assert result["blocked_page_content_available"] is False
+        assert result["content_from_blocked_page_must_not_be_used"] is True
+        assert "snapshot" not in result
+
+    def test_browser_search_direct_url_bot_detection_must_not_expose_page_content(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            return_value=json.dumps({
+                "success": False,
+                "error": "Blocked by bot detection",
+                "bot_detection_detected": True,
+                "blocked_page_content_available": False,
+                "content_from_blocked_page_must_not_be_used": True,
+                "url": "https://pixelscan.net/fingerprint-check",
+            }),
+        ):
+            result = json.loads(bt.browser_search("https://pixelscan.net/fingerprint-check", task_id="test"))
+
+        assert result["success"] is False
+        assert result["direct_navigation"] is True
+        assert result["bot_detection_detected"] is True
+        assert result["blocked_page_content_available"] is False
+        assert result["content_from_blocked_page_must_not_be_used"] is True
+        assert "required_next_action" in result
+        assert "Do not summarize the blocked page" in result["required_next_action"]
+        assert "snapshot" not in result
 
     def test_navigate_waits_once_for_transient_challenge_and_recovers(self):
         import json

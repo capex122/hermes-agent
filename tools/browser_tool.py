@@ -500,6 +500,48 @@ def _capture_compact_snapshot(task_id: str) -> tuple[str, int]:
     return snapshot_text, len(refs) if refs else 0
 
 
+def _build_bot_detection_failure_response(
+    *,
+    matched_pattern: str,
+    final_url: str,
+    title: str,
+    session_info: dict[str, Any] | None,
+    bot_retry_attempt: int,
+    wait_seconds: float | None,
+) -> dict[str, Any]:
+    """Return a sanitized failure payload for bot-detection pages."""
+    features = session_info.get("features", {}) if isinstance(session_info, dict) else {}
+    return {
+        "success": False,
+        "error": (
+            f"Browser navigation hit a bot-detection or access challenge "
+            f"('{matched_pattern}') at {final_url}. Prefer non-browser web "
+            "search/extract tools when available, or a deterministic local tool "
+            "such as terminal/execute_code when possible. If browser tools are your "
+            "only lookup option, retry immediately with browser_search or a direct "
+            "DuckDuckGo/Bing result URL instead of stopping after this blocked page. "
+            "Hermes already waited through transient checks and retried with a fresh "
+            "browser session/profile before reporting this failure. Do NOT summarize "
+            "or infer facts from the blocked page content because the page was not "
+            "successfully accessed."
+        ),
+        "bot_detection_detected": True,
+        "challenge_pattern": matched_pattern,
+        "url": final_url,
+        "title": title,
+        "blocked_page_content_available": False,
+        "content_from_blocked_page_must_not_be_used": True,
+        "fresh_session_retry_attempted": bot_retry_attempt > 0,
+        "fresh_session_retry_count": bot_retry_attempt,
+        "network_rotation_possible": bool(
+            features.get("proxies")
+            or features.get("browser_use")
+            or features.get("advanced_stealth")
+        ),
+        **({"challenge_wait_seconds": wait_seconds} if wait_seconds is not None else {}),
+    }
+
+
 def _should_wait_for_bot_challenge(pattern: Optional[str], url: str) -> bool:
     """Return whether the challenge looks transient enough to wait through once."""
     if not pattern:
@@ -1418,13 +1460,24 @@ def _find_agent_browser() -> str:
             _agent_browser_resolved = True
             return which_result
 
-    # Check local node_modules/.bin/ (npm install in repo root)
+    # Check local node_modules/.bin/ (npm install in repo root).
+    # On Windows prefer the .cmd shim; the extensionless file is a shell
+    # script and raises WinError 193 when executed via subprocess.Popen.
     repo_root = Path(__file__).parent.parent
-    local_bin = repo_root / "node_modules" / ".bin" / "agent-browser"
-    if local_bin.exists():
-        _cached_agent_browser = str(local_bin)
-        _agent_browser_resolved = True
-        return _cached_agent_browser
+    local_bin_base = repo_root / "node_modules" / ".bin" / "agent-browser"
+    local_candidates: list[Path] = []
+    if os.name == "nt":
+        local_candidates.extend([
+            local_bin_base.with_suffix(".cmd"),
+            local_bin_base.with_suffix(".ps1"),
+        ])
+    local_candidates.append(local_bin_base)
+
+    for local_bin in local_candidates:
+        if local_bin.exists():
+            _cached_agent_browser = str(local_bin)
+            _agent_browser_resolved = True
+            return _cached_agent_browser
     
     # Check common npx locations (also search the extended fallback PATH)
     npx_path = shutil.which("npx")
@@ -1583,9 +1636,9 @@ def _run_browser_command(
                            command, timeout, task_id, task_socket_dir)
             return {"success": False, "error": f"Command timed out after {timeout} seconds"}
 
-        with open(stdout_path, "r") as f:
+        with open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
             stdout = f.read()
-        with open(stderr_path, "r") as f:
+        with open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
             stderr = f.read()
         returncode = proc.returncode
 
@@ -2165,34 +2218,15 @@ def browser_navigate(
                     retried["challenge_wait_seconds"] = wait_seconds
                 return json.dumps(retried, ensure_ascii=False)
 
-            features = session_info.get("features", {}) if isinstance(session_info, dict) else {}
             return json.dumps(
-                {
-                    "success": False,
-                    "error": (
-                        f"Browser navigation hit a bot-detection or access challenge "
-                        f"('{matched_pattern}') at {final_url or url}. Prefer non-browser web "
-                        "search/extract tools when available, or a deterministic local tool "
-                        "such as terminal/execute_code when possible. If browser tools are your "
-                        "only lookup option, retry immediately with browser_search or a direct "
-                        "DuckDuckGo/Bing result URL instead of stopping after this blocked page. "
-                        "Hermes already waited through transient checks and retried with a fresh "
-                        "browser session/profile before reporting this failure."
-                    ),
-                    "bot_detection_detected": True,
-                    "challenge_pattern": matched_pattern,
-                    "url": final_url,
-                    "title": title,
-                    "fresh_session_retry_attempted": _bot_retry_attempt > 0,
-                    "fresh_session_retry_count": _bot_retry_attempt,
-                    "network_rotation_possible": bool(
-                        features.get("proxies")
-                        or features.get("browser_use")
-                        or features.get("advanced_stealth")
-                    ),
-                    **({"challenge_wait_seconds": wait_seconds} if wait_seconds is not None else {}),
-                    **({"snapshot": response["snapshot"]} if response.get("snapshot") else {}),
-                },
+                _build_bot_detection_failure_response(
+                    matched_pattern=matched_pattern,
+                    final_url=final_url or url,
+                    title=title,
+                    session_info=session_info,
+                    bot_retry_attempt=_bot_retry_attempt,
+                    wait_seconds=wait_seconds,
+                ),
                 ensure_ascii=False,
             )
 
@@ -2222,6 +2256,11 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
         result = json.loads(browser_navigate(nav_url, task_id=task_id))
         result["direct_navigation"] = True
         result["note"] = "Query looked like a URL — navigated directly instead of searching."
+        if result.get("bot_detection_detected"):
+            result["required_next_action"] = (
+                "Do not summarize the blocked page. Report that direct access was blocked by "
+                "bot detection, and only suggest a retry or an alternate lookup tool if one is available."
+            )
         return json.dumps(result, ensure_ascii=False)
 
     attempts: list[dict[str, Any]] = []
@@ -2320,6 +2359,11 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
         result = json.loads(browser_navigate(nav_url, task_id=task_id))
         result["direct_navigation"] = True
         result["note"] = "Query looked like a URL — navigated directly instead of multi-searching."
+        if result.get("bot_detection_detected"):
+            result["required_next_action"] = (
+                "Do not synthesize facts from the blocked page. Report only that direct access "
+                "was blocked by bot detection unless another tool can fetch the content."
+            )
         return json.dumps(result, ensure_ascii=False)
 
     encoded_query = urllib.parse.quote_plus(normalized_query)

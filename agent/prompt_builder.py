@@ -179,7 +179,11 @@ ACTION_EXECUTION_GUIDANCE = (
     "- If the request is safe and unambiguous, make the tool call in the same turn.\n"
     "- If live-lookup tools are available, do not answer with a generic refusal such as "
     "'I cannot provide real-time information' or tell the user to check a website/app "
-    "before you attempt the lookup tools."
+    "before you attempt the lookup tools.\n"
+    "- If a browser tool returns success=false, bot_detection_detected=true, "
+    "blocked_page_content_available=false, blocked_by_policy, or discouraged_search_target, "
+    "treat the page content as unavailable. Do NOT summarize, paraphrase, or infer facts "
+    "from that failed browser response."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
@@ -373,6 +377,10 @@ def build_search_intent_guidance(
         "Do NOT give up after a failed browser_search — navigate immediately.\n"
         "- If browser_navigate also hits bot detection at a fallback site, immediately try "
         "the next URL in the 'fallback_urls' list without asking for confirmation.\n"
+        "- If any browser tool response has success=false, bot_detection_detected=true, or "
+        "content_from_blocked_page_must_not_be_used=true, do not summarize page details from "
+        "that response. Treat the page as inaccessible and either retry with another tool or "
+        "report that access was blocked.\n"
         f"{deterministic_time_line}"
         "- If the user says 'search for ...' without mentioning files, the repo, the "
         "workspace, code, directories, or paths, default to a web search rather than a "

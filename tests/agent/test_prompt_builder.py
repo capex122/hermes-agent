@@ -1094,6 +1094,11 @@ class TestSearchIntentGuidance:
         assert "do not stop there" in text
         assert "before saying you cannot search" in text
 
+    def test_guidance_forbids_summarizing_blocked_browser_pages(self):
+        text = build_search_intent_guidance({"browser_search", "browser_navigate", "browser_snapshot"})
+        assert "content_from_blocked_page_must_not_be_used" in text
+        assert "do not summarize page details" in text
+
     def test_guidance_prefers_browser_search_when_loaded(self):
         text = build_search_intent_guidance(
             {"browser_search", "browser_navigate", "browser_snapshot", "search_files"}
