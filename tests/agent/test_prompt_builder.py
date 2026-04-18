@@ -1086,8 +1086,8 @@ class TestSearchIntentGuidance:
         """Prompt must tell model to do direct navigation when browser_search fails."""
         text = build_search_intent_guidance({"browser_search", "browser_navigate"})
         assert "browser_navigate" in text
-        assert "flashscore" in text or "livescore" in text or "bbc.com/sport" in text
-        assert "next_step_hint" in text
+        assert "fallback_urls" in text
+        assert "required_next_action" in text
 
     def test_guidance_retries_lookup_before_giving_up(self):
         text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})

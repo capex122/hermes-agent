@@ -426,7 +426,7 @@ class TestBotDetectionHandling:
 
         assert result["success"] is False
         assert result["attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
-        assert "next_step_hint" in result
+        assert "required_next_action" in result
 
     def test_browser_search_requires_actionable_results_before_success(self):
         import json
@@ -460,7 +460,7 @@ class TestBotDetectionHandling:
 
         assert result["success"] is False
         assert result["attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
-        assert "next_step_hint" in result
+        assert "required_next_action" in result
 
     def test_browser_search_reports_all_attempted_engines_on_failure(self):
         import json
@@ -481,7 +481,7 @@ class TestBotDetectionHandling:
         assert result["attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
         assert result["bot_detection_detected"] is True
 
-    def test_browser_search_failure_includes_next_step_hint(self):
+    def test_browser_search_failure_includes_required_next_action(self):
         """Failure response must tell the model to use direct navigation instead of stopping."""
         import json
         import tools.browser_tool as bt
@@ -498,14 +498,17 @@ class TestBotDetectionHandling:
             result = json.loads(bt.browser_search("saudi clubs last 2 days", task_id="test"))
 
         assert result["success"] is False
-        assert "next_step_hint" in result
-        hint = result["next_step_hint"]
-        # hint must point toward direct navigation, not giving up
-        assert "browser_navigate" in hint
-        assert "flashscore" in hint or "livescore" in hint or "bbc" in hint
+        assert "required_next_action" in result
+        assert "fallback_urls" in result
+        action = result["required_next_action"]
+        # action must point toward direct navigation, not giving up
+        assert "browser_navigate" in action
+        # sports query → saudi-specific fallback urls
+        assert any("flashscore" in u or "livescore" in u for u in result["fallback_urls"])
+        assert any("saudi" in u for u in result["fallback_urls"])
 
     def test_browser_search_failure_no_bot_detection_includes_generic_hint(self):
-        """Non-bot-blocked failure also gets a next_step_hint."""
+        """Non-bot-blocked failure also gets a required_next_action."""
         import json
         import tools.browser_tool as bt
 
@@ -521,5 +524,36 @@ class TestBotDetectionHandling:
             result = json.loads(bt.browser_search("some topic", task_id="test"))
 
         assert result["success"] is False
-        assert "next_step_hint" in result
-        assert "browser_navigate" in result["next_step_hint"]
+        assert "required_next_action" in result
+        assert "fallback_urls" in result
+        assert "browser_navigate" in result["required_next_action"]
+
+    def test_build_fallback_urls_returns_sports_urls_for_saudi_query(self):
+        """_build_fallback_urls should return Saudi-specific sports URLs for relevant queries."""
+        import tools.browser_tool as bt
+
+        urls = bt._build_fallback_urls("Saudi Arabian football games last 2 days")
+        assert any("saudi-arabia" in u for u in urls), f"Expected saudi-arabia URL in {urls}"
+        assert any("flashscore" in u or "livescore" in u for u in urls)
+
+    def test_build_fallback_urls_returns_sports_urls_for_generic_sport_query(self):
+        import tools.browser_tool as bt
+
+        urls = bt._build_fallback_urls("champions league results")
+        assert any("flashscore" in u or "livescore" in u or "bbc.com/sport" in u for u in urls)
+
+    def test_build_fallback_urls_returns_news_urls_for_news_query(self):
+        import tools.browser_tool as bt
+
+        urls = bt._build_fallback_urls("latest news today")
+        assert any("bbc.com/news" in u or "reuters" in u or "apnews" in u for u in urls)
+
+    def test_browser_search_schema_description_mentions_fallback_urls(self):
+        """Schema description must instruct model to use fallback_urls on failure."""
+        import tools.browser_tool as bt
+
+        schema = bt._BROWSER_SCHEMA_MAP["browser_search"]
+        desc = schema["description"]
+        assert "fallback_urls" in desc
+        assert "CRITICAL" in desc or "REQUIRED" in desc
+

@@ -744,7 +744,16 @@ BROWSER_TOOL_SCHEMAS = [
     },
     {
         "name": "browser_search",
-        "description": "Search the web using a browser-safe search flow when browser tools are your only lookup option. Tries DuckDuckGo first and falls back to Bing if needed, then returns the result page with a compact snapshot and interactive ref IDs. Prefer this over manually navigating to Google or another search-engine homepage.",
+        "description": (
+            "Search the web using a browser-safe search flow when browser tools are your only "
+            "lookup option. Tries DuckDuckGo, Bing, and Yahoo in sequence, returning the result "
+            "page with a compact snapshot and interactive ref IDs. Prefer this over manually "
+            "navigating to Google or another search-engine homepage.\n"
+            "CRITICAL — when this tool returns success=false: you MUST immediately call "
+            "browser_navigate on one of the URLs listed in the 'fallback_urls' field of the "
+            "response. Do NOT apologise or tell the user you cannot find the information — "
+            "navigate directly to a relevant authoritative site instead."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -1409,6 +1418,124 @@ def _build_browser_search_urls(query: str) -> list[tuple[str, str]]:
     ]
 
 
+_SPORTS_KEYWORDS = frozenset({
+    "football", "soccer", "match", "matches", "game", "games", "score", "scores",
+    "result", "results", "goal", "goals", "club", "clubs", "league", "team", "teams",
+    "played", "fixture", "fixtures", "standings", "table", "tournament", "cup",
+    "champions", "premier", "serie", "bundesliga", "laliga", "ligue",
+    "saudi", "sapl", "spl",
+})
+_NEWS_KEYWORDS = frozenset({
+    "news", "latest", "current", "today", "yesterday", "recent", "happened",
+    "announced", "reported", "update", "breaking",
+})
+
+
+def _build_fallback_urls(query: str) -> list[str]:
+    """Return direct navigation URLs matched to the query topic."""
+    words = set((query or "").lower().split())
+    encoded = urllib.parse.quote_plus(" ".join((query or "").split()))
+    if words & _SPORTS_KEYWORDS:
+        saudi_specific = any(w in words for w in ("saudi", "sapl", "spl"))
+        return [
+            "https://www.flashscore.com/football/saudi-arabia/" if saudi_specific
+            else f"https://www.flashscore.com/search/#{encoded}",
+            "https://www.livescore.com/en/football/saudi-arabia/" if saudi_specific
+            else "https://www.livescore.com/en/football/",
+            "https://www.bbc.com/sport/football",
+            f"https://www.google.com/search?q={encoded}",
+        ]
+    if words & _NEWS_KEYWORDS:
+        return [
+            "https://www.bbc.com/news",
+            "https://apnews.com",
+            "https://www.reuters.com",
+            f"https://www.google.com/search?q={encoded}",
+        ]
+    return [
+        f"https://en.wikipedia.org/wiki/Special:Search?search={encoded}",
+        f"https://www.google.com/search?q={encoded}",
+    ]
+
+
+_SPORTS_KEYWORDS = frozenset({
+    "football", "soccer", "match", "matches", "game", "games", "score", "scores",
+    "result", "results", "goal", "goals", "club", "clubs", "league", "team", "teams",
+    "played", "fixture", "fixtures", "standings", "table", "tournament", "cup",
+    "champions", "premier", "serie", "bundesliga", "laliga", "ligue",
+    "saudi", "sapl", "spl",
+})
+_NEWS_KEYWORDS = frozenset({
+    "news", "latest", "current", "today", "yesterday", "recent", "happened",
+    "announced", "reported", "update", "breaking",
+})
+
+
+def _build_fallback_urls(query: str) -> list[str]:
+    """Return direct navigation URLs matched to the query topic."""
+    words = set((query or "").lower().split())
+    encoded = urllib.parse.quote_plus(" ".join((query or "").split()))
+    if words & _SPORTS_KEYWORDS:
+        saudi_specific = any(w in words for w in ("saudi", "sapl", "spl"))
+        return [
+            "https://www.flashscore.com/football/saudi-arabia/" if saudi_specific
+            else f"https://www.flashscore.com/search/#{encoded}",
+            "https://www.livescore.com/en/football/saudi-arabia/" if saudi_specific
+            else "https://www.livescore.com/en/football/",
+            "https://www.bbc.com/sport/football",
+            f"https://www.google.com/search?q={encoded}",
+        ]
+    if words & _NEWS_KEYWORDS:
+        return [
+            "https://www.bbc.com/news",
+            "https://apnews.com",
+            "https://www.reuters.com",
+            f"https://www.google.com/search?q={encoded}",
+        ]
+    return [
+        f"https://en.wikipedia.org/wiki/Special:Search?search={encoded}",
+        f"https://www.google.com/search?q={encoded}",
+    ]
+
+
+_SPORTS_KEYWORDS = frozenset({
+    "football", "soccer", "match", "matches", "game", "games", "score", "scores",
+    "result", "results", "goal", "goals", "club", "clubs", "league", "team", "teams",
+    "played", "fixture", "fixtures", "standings", "table", "tournament", "cup",
+    "champions", "premier", "serie", "bundesliga", "laliga", "ligue",
+    "saudi", "sapl", "spl",
+})
+_NEWS_KEYWORDS = frozenset({
+    "news", "latest", "current", "today", "yesterday", "recent", "happened",
+    "announced", "reported", "update", "breaking",
+})
+
+
+def _build_fallback_urls(query: str) -> list[str]:
+    """Return direct navigation URLs suited to the query topic."""
+    words = set((query or "").lower().split())
+    encoded = urllib.parse.quote_plus(" ".join((query or "").split()))
+    if words & _SPORTS_KEYWORDS:
+        return [
+            f"https://www.flashscore.com/search/#{encoded}",
+            "https://www.flashscore.com/football/saudi-arabia/"
+            if any(w in words for w in ("saudi", "sapl", "spl")) else
+            f"https://www.flashscore.com/football/",
+            f"https://www.livescore.com/en/football/",
+            f"https://www.bbc.com/sport/football",
+        ]
+    if words & _NEWS_KEYWORDS:
+        return [
+            f"https://www.bbc.com/news",
+            f"https://apnews.com",
+            f"https://www.reuters.com",
+        ]
+    return [
+        f"https://en.wikipedia.org/wiki/Special:Search?search={encoded}",
+        f"https://www.bbc.com",
+    ]
+
+
 def _google_search_guidance(url: str) -> str | None:
     """Return guidance when browser_navigate is pointed at Google search pages."""
     parsed = _parse_browser_target_url(url)
@@ -1757,6 +1884,7 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             return json.dumps(result, ensure_ascii=False)
 
     bot_blocked = any(attempt.get("bot_detection_detected") for attempt in attempts)
+    fallback_urls = _build_fallback_urls(normalized_query)
     return json.dumps(
         {
             "success": False,
@@ -1770,15 +1898,10 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             "attempted_urls": [attempt["url"] for attempt in attempts],
             **({"bot_detection_detected": True} if bot_blocked else {}),
             **({"challenge_pattern": last_result.get("challenge_pattern")} if last_result.get("challenge_pattern") else {}),
-            "next_step_hint": (
-                "Search engines are bot-blocked. Use browser_navigate to go directly to a "
-                "well-known authoritative website for this topic. For sports scores/results: "
-                "flashscore.com, livescore.com, bbc.com/sport. For news: bbc.com/news, "
-                "reuters.com, apnews.com. For general lookup: wikipedia.org. "
-                "Do NOT give up — navigate directly to a relevant site instead."
-                if bot_blocked else
-                "Search returned no usable results. Use browser_navigate to go directly "
-                "to a well-known authoritative website for this topic rather than stopping."
+            "fallback_urls": fallback_urls,
+            "required_next_action": (
+                f"REQUIRED: call browser_navigate immediately on one of these URLs — "
+                f"do NOT report failure to the user: {', '.join(fallback_urls[:2])}"
             ),
         },
         ensure_ascii=False,
