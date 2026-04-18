@@ -84,6 +84,8 @@ def _import_sounddevice():
 # ===========================================================================
 DEFAULT_PROVIDER = "edge"
 DEFAULT_EDGE_VOICE = "en-US-AriaNeural"
+DEFAULT_EDGE_VOICE_ARABIC = "ar-SA-ZariyahNeural"  # Female, Saudi Arabic
+DEFAULT_EDGE_VOICE_ARABIC_MALE = "ar-SA-HamedNeural"  # Male, Saudi Arabic
 DEFAULT_ELEVENLABS_VOICE_ID = "pNInz6obpgDQGcFmaJgB"  # Adam
 DEFAULT_ELEVENLABS_MODEL_ID = "eleven_multilingual_v2"
 DEFAULT_ELEVENLABS_STREAMING_MODEL_ID = "eleven_flash_v2_5"
@@ -141,6 +143,98 @@ def _load_tts_config() -> Dict[str, Any]:
 def _get_provider(tts_config: Dict[str, Any]) -> str:
     """Get the configured TTS provider name."""
     return (tts_config.get("provider") or DEFAULT_PROVIDER).lower().strip()
+
+
+# ===========================================================================
+# Language detection — auto-switch voice when a non-English script appears.
+# Many TTS providers (Edge, ElevenLabs single-lang model, OpenAI's English
+# voices) garble or silently truncate non-Latin scripts.  We detect the
+# dominant script in the input text and override the voice when the
+# configured one is clearly mismatched.
+# ===========================================================================
+
+
+def _detect_text_language(text: str) -> str:
+    """Return a coarse language code for the dominant script in ``text``.
+
+    Recognised values: ``ar`` (Arabic), ``zh`` (CJK), ``ja`` (Japanese
+    kana), ``ko`` (Hangul), ``ru`` (Cyrillic), ``el`` (Greek), ``he``
+    (Hebrew), ``hi`` (Devanagari), ``th`` (Thai), or ``en`` (default —
+    Latin or no detectable script).
+
+    Detection is based on Unicode code points and the dominant
+    non-ASCII script.  ASCII-only text always returns ``en``.
+    """
+    if not text:
+        return "en"
+    counts: dict[str, int] = {}
+    for ch in text:
+        cp = ord(ch)
+        if cp < 0x80:
+            continue
+        if 0x0600 <= cp <= 0x06FF or 0x0750 <= cp <= 0x077F or 0xFB50 <= cp <= 0xFDFF or 0xFE70 <= cp <= 0xFEFF:
+            counts["ar"] = counts.get("ar", 0) + 1
+        elif 0x3040 <= cp <= 0x30FF:
+            counts["ja"] = counts.get("ja", 0) + 1
+        elif 0xAC00 <= cp <= 0xD7AF:
+            counts["ko"] = counts.get("ko", 0) + 1
+        elif 0x4E00 <= cp <= 0x9FFF:
+            counts["zh"] = counts.get("zh", 0) + 1
+        elif 0x0400 <= cp <= 0x04FF:
+            counts["ru"] = counts.get("ru", 0) + 1
+        elif 0x0370 <= cp <= 0x03FF:
+            counts["el"] = counts.get("el", 0) + 1
+        elif 0x0590 <= cp <= 0x05FF:
+            counts["he"] = counts.get("he", 0) + 1
+        elif 0x0900 <= cp <= 0x097F:
+            counts["hi"] = counts.get("hi", 0) + 1
+        elif 0x0E00 <= cp <= 0x0E7F:
+            counts["th"] = counts.get("th", 0) + 1
+    if not counts:
+        return "en"
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+# Edge TTS voice presets per language.  The first entry is the default.
+# All voices are free Microsoft neural voices that ship with edge-tts.
+_EDGE_VOICES_BY_LANG: dict[str, str] = {
+    "ar": "ar-SA-ZariyahNeural",
+    "zh": "zh-CN-XiaoxiaoNeural",
+    "ja": "ja-JP-NanamiNeural",
+    "ko": "ko-KR-SunHiNeural",
+    "ru": "ru-RU-SvetlanaNeural",
+    "el": "el-GR-AthinaNeural",
+    "he": "he-IL-HilaNeural",
+    "hi": "hi-IN-SwaraNeural",
+    "th": "th-TH-PremwadeeNeural",
+    "en": DEFAULT_EDGE_VOICE,
+}
+
+
+def _edge_voice_lang_prefix(voice: str) -> str:
+    """Return the BCP-47 language prefix from an Edge voice id."""
+    if not voice or "-" not in voice:
+        return ""
+    head = voice.split("-", 1)[0].lower()
+    return head
+
+
+def _resolve_edge_voice_for_text(configured_voice: str, text: str) -> str:
+    """Auto-pick an Edge TTS voice that matches the script of ``text``.
+
+    If the configured voice already matches the detected language we keep
+    it; otherwise we swap in the language-appropriate default so the
+    output isn't garbled English-phoneme attempts at Arabic / Chinese /
+    etc.  This is the cheapest possible "language support" for free
+    Edge TTS users — no extra deps, no API calls.
+    """
+    detected = _detect_text_language(text)
+    if detected == "en":
+        return configured_voice or DEFAULT_EDGE_VOICE
+    voice_lang = _edge_voice_lang_prefix(configured_voice)
+    if voice_lang == detected:
+        return configured_voice
+    return _EDGE_VOICES_BY_LANG.get(detected, configured_voice or DEFAULT_EDGE_VOICE)
 
 
 # ===========================================================================
@@ -204,6 +298,19 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
     _edge_tts = _import_edge_tts()
     edge_config = tts_config.get("edge", {})
     voice = edge_config.get("voice", DEFAULT_EDGE_VOICE)
+    # Auto-switch to a script-appropriate voice when the input text uses a
+    # non-Latin script (Arabic, CJK, Cyrillic, etc.) and the configured
+    # voice doesn't already match.  Users can opt out by setting
+    # ``tts.edge.auto_language_voice: false`` in config.yaml.
+    if edge_config.get("auto_language_voice", True):
+        resolved_voice = _resolve_edge_voice_for_text(voice, text)
+        if resolved_voice != voice:
+            logger.info(
+                "Edge TTS auto-switched voice %s -> %s for detected text language",
+                voice,
+                resolved_voice,
+            )
+            voice = resolved_voice
     speed = float(edge_config.get("speed", tts_config.get("speed", 1.0)))
 
     kwargs = {"voice": voice}

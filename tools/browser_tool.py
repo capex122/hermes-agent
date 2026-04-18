@@ -170,7 +170,7 @@ _last_screenshot_cleanup_by_dir: dict[str, float] = {}
 # ============================================================================
 
 # Default timeout for browser commands (seconds)
-DEFAULT_COMMAND_TIMEOUT = 30
+DEFAULT_COMMAND_TIMEOUT = 60
 
 # Max tokens for snapshot content before summarization
 SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
@@ -862,7 +862,7 @@ def _get_command_timeout() -> int:
     """Return the configured browser command timeout from config.yaml.
 
     Reads ``config["browser"]["command_timeout"]`` and falls back to
-    ``DEFAULT_COMMAND_TIMEOUT`` (30s) if unset or unreadable.  Result is
+    ``DEFAULT_COMMAND_TIMEOUT`` (60s) if unset or unreadable.  Result is
     cached after the first call and cleared by ``cleanup_all_browsers()``.
     """
     global _cached_command_timeout, _command_timeout_resolved
@@ -2421,6 +2421,197 @@ def _normalize_non_browser_search_results(
     return normalized_results
 
 
+# Browser-like headers used by the HTTP-only fallback functions below.
+# DuckDuckGo / Wikipedia behave very differently when they see a bare
+# ``Mozilla/5.0`` UA versus a full set of headers — the latter is far
+# less likely to trip captcha/empty-result paths.
+_HTTP_FALLBACK_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "DNT": "1",
+}
+
+
+def _ddg_lite_search(query: str, *, limit: int = 10) -> list[dict[str, str]]:
+    """DuckDuckGo Lite scrape — text-only HTML page that almost never
+    serves captchas or empty result pages from datacenter IPs.  Used as
+    a secondary fallback when the regular DDG HTML page is empty.
+    """
+    if os.environ.get("HERMES_DISABLE_HTTP_FALLBACKS"):
+        return []
+    try:
+        import httpx
+    except ImportError:
+        return []
+    encoded = urllib.parse.quote_plus(query)
+    url = f"https://lite.duckduckgo.com/lite/?q={encoded}"
+    try:
+        resp = httpx.get(
+            url,
+            headers=_HTTP_FALLBACK_HEADERS,
+            follow_redirects=True,
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ddg_lite fetch failed: %s", str(exc)[:200])
+        return []
+
+    html_text = resp.text
+    # Lite results: <a rel="nofollow" href="URL">TITLE</a> followed by
+    # a snippet td. Use simple regex — page is plain HTML.
+    link_re = re.compile(
+        r'<a[^>]+rel="nofollow"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    snippet_re = re.compile(
+        r'class="result-snippet"[^>]*>(.*?)</td>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    titles_urls = link_re.findall(html_text)
+    snippets = [re.sub(r"<[^>]+>", "", s).strip() for s in snippet_re.findall(html_text)]
+
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for idx, (raw_url, raw_title) in enumerate(titles_urls):
+        # Decode DDG redirect wrapper
+        if raw_url.startswith("/l/?") or raw_url.startswith("//duckduckgo.com/l/?"):
+            try:
+                qs = urllib.parse.urlparse(raw_url).query
+                actual = urllib.parse.parse_qs(qs).get("uddg", [""])[0]
+                if actual:
+                    raw_url = urllib.parse.unquote(actual)
+            except Exception:  # noqa: BLE001
+                continue
+        if raw_url.startswith("//"):
+            raw_url = "https:" + raw_url
+        if not raw_url.startswith(("http://", "https://")):
+            continue
+        if raw_url in seen:
+            continue
+        seen.add(raw_url)
+        title = re.sub(r"<[^>]+>", "", raw_title).strip()
+        snippet = snippets[idx] if idx < len(snippets) else ""
+        results.append({"title": title, "url": raw_url, "description": snippet})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _wikipedia_api_search(query: str, *, limit: int = 5) -> list[dict[str, str]]:
+    """Wikipedia REST search — always free, never blocks, returns rich
+    structured snippets.  Excellent for factual / educational queries
+    and as a topic-discovery fallback when search engines are blocked.
+    """
+    if os.environ.get("HERMES_DISABLE_HTTP_FALLBACKS"):
+        return []
+    try:
+        import httpx
+    except ImportError:
+        return []
+    try:
+        resp = httpx.get(
+            "https://en.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "srlimit": limit,
+                "format": "json",
+                "utf8": 1,
+            },
+            headers={"User-Agent": "hermes-agent/1.0 (+https://github.com/capex122/hermes-agent)"},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("wikipedia api fetch failed: %s", str(exc)[:200])
+        return []
+
+    results: list[dict[str, str]] = []
+    for item in (data.get("query") or {}).get("search") or []:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        snippet = re.sub(r"<[^>]+>", "", str(item.get("snippet") or "")).strip()
+        page_url = "https://en.wikipedia.org/wiki/" + urllib.parse.quote(title.replace(" ", "_"))
+        results.append({"title": title, "url": page_url, "description": snippet})
+    return results
+
+
+def _http_only_browser_navigate(url: str) -> Optional[dict[str, Any]]:
+    """Plain HTTP fetch fallback for ``browser_navigate`` when the
+    agent-browser CLI is not installed or fails to start.
+
+    Returns a result dict with ``success``, ``url``, ``title``,
+    ``snapshot`` (cleaned text excerpt), and ``content`` (raw HTML
+    truncated).  Returns ``None`` on hard failure so the caller can
+    surface the original browser error.
+    """
+    if os.environ.get("HERMES_DISABLE_HTTP_FALLBACKS"):
+        return None
+    try:
+        import httpx
+    except ImportError:
+        return None
+    if not url.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        resp = httpx.get(
+            url,
+            headers=_HTTP_FALLBACK_HEADERS,
+            follow_redirects=True,
+            timeout=45,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("http-only navigate fetch failed for %s: %s", url, str(exc)[:200])
+        return None
+
+    final_url = str(resp.url)
+    html_text = resp.text or ""
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", html_text, re.IGNORECASE | re.DOTALL)
+    title = re.sub(r"\s+", " ", (title_match.group(1) if title_match else "")).strip()
+
+    # Strip script/style blocks then HTML tags for a readable text snapshot.
+    cleaned = re.sub(
+        r"<(script|style|noscript)[^>]*>.*?</\1>",
+        " ",
+        html_text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    snapshot = cleaned[:8000]
+
+    return {
+        "success": resp.status_code < 400,
+        "url": final_url,
+        "title": title,
+        "status_code": resp.status_code,
+        "snapshot": snapshot,
+        "content": html_text[:20000],
+        "fetched_via": "http_only_fallback",
+        "note": (
+            "agent-browser CLI was unavailable; this page was fetched via plain HTTPS. "
+            "JavaScript was not executed, so dynamic content may be missing."
+        ),
+    }
+
+
 def _run_non_browser_search_fallbacks(
     query: str,
     *,
@@ -2432,14 +2623,36 @@ def _run_non_browser_search_fallbacks(
     1. ``local_web_search`` — direct DuckDuckGo HTML scrape via ``httpx``.
        Free, no API key, no extra dependencies, typically <5s.  Works even
        when the browser stack and all paid backends are unavailable.
-    2. ``web_search_tool`` — the configured web search backend (Parallel,
+    2. ``_ddg_lite_search`` — DuckDuckGo Lite text page.  Almost never
+       serves captchas, useful when (1) is throttled.
+    3. ``_wikipedia_api_search`` — official Wikipedia API.  Always free,
+       never blocks, ideal for factual queries.
+    4. ``web_search_tool`` — the configured web search backend (Parallel,
        Firecrawl, etc.).  Skipped silently when its dependencies/keys are
        missing so the free path above remains the primary fallback.
-    3. ``web_source_search_tool`` — multi-adapter source search.  Slower
+    5. ``web_source_search_tool`` — multi-adapter source search.  Slower
        (multiple DDG queries) but useful when the previous paths return
        nothing.
+
+    All free sources are stacked: even when the primary DDG HTML scrape
+    succeeds with a thin result set, the lite + wikipedia results are
+    merged in afterwards (deduped by URL) up to ``limit``.
     """
+    merged: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    used_sources: list[str] = []
+
+    def _merge(new_items: list[dict[str, str]]) -> None:
+        for item in new_items:
+            url = (item.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            merged.append(item)
+            if len(merged) >= limit:
+                break
     # 1) Free local DuckDuckGo HTML — always available, no keys, no deps
+    primary_label: Optional[str] = None
     try:
         from tools.webplus_backend import local_web_search
 
@@ -2449,14 +2662,50 @@ def _run_non_browser_search_fallbacks(
             limit=limit,
         )
         if local_payload.get("success") and local_results:
-            return "local_web_search_fallback", local_results
+            _merge(local_results)
+            primary_label = "local_web_search_fallback"
     except Exception as fallback_err:  # noqa: BLE001
         logger.warning(
             "browser search → local_web_search fallback failed: %s",
             str(fallback_err)[:200],
         )
 
-    # 2) Configured web backend (Parallel/Firecrawl/etc.) — only if available
+    # 2) DuckDuckGo Lite — text-only, rarely captcha'd
+    if len(merged) < limit:
+        try:
+            lite_results = _ddg_lite_search(query, limit=limit)
+            if lite_results:
+                _merge(lite_results)
+                used_sources.append("ddg_lite")
+                if primary_label is None:
+                    primary_label = "ddg_lite_fallback"
+        except Exception as fallback_err:  # noqa: BLE001
+            logger.debug(
+                "browser search → ddg_lite fallback failed: %s",
+                str(fallback_err)[:200],
+            )
+
+    # 3) Wikipedia API — always free, never blocks
+    if len(merged) < limit:
+        try:
+            wiki_results = _wikipedia_api_search(query, limit=min(5, limit))
+            if wiki_results:
+                _merge(wiki_results)
+                used_sources.append("wikipedia_api")
+                if primary_label is None:
+                    primary_label = "wikipedia_api_fallback"
+        except Exception as fallback_err:  # noqa: BLE001
+            logger.debug(
+                "browser search → wikipedia fallback failed: %s",
+                str(fallback_err)[:200],
+            )
+
+    # If any of the free sources produced something, return now — no need
+    # to spend API quota on the configured paid backends.
+    if merged and primary_label:
+        return primary_label, merged
+
+    # 4) Configured web backend (Parallel/Firecrawl/etc.) — only if available
     try:
         from tools.web_tools import web_search_tool
 
@@ -2474,7 +2723,7 @@ def _run_non_browser_search_fallbacks(
             str(fallback_err)[:200],
         )
 
-    # 3) Multi-adapter source search — slower last-resort
+    # 5) Multi-adapter source search — slower last-resort
     try:
         from tools.webplus_tool import web_source_search_tool
 
@@ -2986,7 +3235,7 @@ def browser_navigate(
         effective_task_id,
         "open",
         [url],
-        timeout=max(_get_command_timeout(), 60),
+        timeout=max(_get_command_timeout(), 90),
         provider_override=provider_override,
     )
     
@@ -3106,6 +3355,26 @@ def browser_navigate(
         _record_session_proxy_outcome(session_info, "success")
         return json.dumps(response, ensure_ascii=False)
     else:
+        # Last-resort HTTP fallback — when the agent-browser CLI is missing
+        # or the cloud session failed, we can still fetch many static pages
+        # over plain HTTPS and return useful text content to the model.
+        # Triggered for the most common unrecoverable browser failures
+        # (CLI not installed, cloud session creation failed, command
+        # timed out before any output).
+        err_text = str(result.get("error") or "")
+        unrecoverable_signals = (
+            "agent-browser CLI not found",
+            "Failed to create browser session",
+            "Command timed out",
+            "Browser command failed to start",
+        )
+        if any(signal in err_text for signal in unrecoverable_signals):
+            http_fallback = _http_only_browser_navigate(url)
+            if http_fallback is not None and http_fallback.get("success"):
+                http_fallback["browser_failure_reason"] = err_text
+                http_fallback["browser_failure_recovered_via"] = "http_only_fallback"
+                return json.dumps(http_fallback, ensure_ascii=False)
+
         return json.dumps({
             "success": False,
             "error": result.get("error", "Navigation failed")

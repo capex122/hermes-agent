@@ -454,7 +454,7 @@ def _duckduckgo_html_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         params={"q": query},
         headers=_DEFAULT_HEADERS,
         follow_redirects=True,
-        timeout=20,
+        timeout=30,
     )
     response.raise_for_status()
 

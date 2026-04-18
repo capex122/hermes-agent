@@ -237,6 +237,12 @@ def _hermetic_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("AWS_METADATA_SERVICE_TIMEOUT", "1")
     monkeypatch.setenv("AWS_METADATA_SERVICE_NUM_ATTEMPTS", "1")
 
+    # 4c. Disable browser_tool's HTTP-only fallback paths (DDG Lite,
+    #     Wikipedia API, plain-HTTPS navigate). These make real network
+    #     calls when not mocked and would either flake or contaminate
+    #     tests that assume "no fallback succeeded".
+    monkeypatch.setenv("HERMES_DISABLE_HTTP_FALLBACKS", "1")
+
     # 5. Reset plugin singleton so tests don't leak plugins from
     #    ~/.hermes/plugins/ (which, per step 3, is now empty — but the
     #    singleton might still be cached from a previous test).

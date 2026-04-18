@@ -126,16 +126,16 @@ class TestFindAgentBrowserCache:
 
 class TestCommandTimeoutCache:
 
-    def test_default_is_30(self):
+    def test_default_is_60(self):
         from tools.browser_tool import _get_command_timeout
         with patch("hermes_cli.config.read_raw_config", return_value={}):
-            assert _get_command_timeout() == 30
+            assert _get_command_timeout() == 60
 
     def test_reads_from_config(self):
         from tools.browser_tool import _get_command_timeout
-        cfg = {"browser": {"command_timeout": 60}}
+        cfg = {"browser": {"command_timeout": 90}}
         with patch("hermes_cli.config.read_raw_config", return_value=cfg):
-            assert _get_command_timeout() == 60
+            assert _get_command_timeout() == 90
 
     def test_cached_after_first_call(self):
         from tools.browser_tool import _get_command_timeout
