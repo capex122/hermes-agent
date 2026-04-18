@@ -123,7 +123,7 @@ TOOLSETS = {
     "webplus": {
         "description": "Bundled/local web research toolkit with fetch, deep search, YouTube helpers, and browser inspection",
         "tools": [
-            "web_fetch", "web_deep_search",
+            "web_fetch", "web_source_search", "web_deep_search",
             "youtube_search", "youtube_transcript",
             "web_inspect"
         ],

@@ -13,6 +13,8 @@ from tools.webplus_inspect import collect_browser_inspect_data
 from tools.webplus_backend import (
     _call_bundled_backend,
     bundled_backend_is_available,
+    bundled_web_extract,
+    bundled_web_search,
     fetch_youtube_transcript_local,
     youtube_transcript_support_available,
 )
@@ -46,7 +48,11 @@ def check_web_fetch_requirements() -> bool:
 
 
 def check_web_deep_search_requirements() -> bool:
-    return _web_available()
+    return True
+
+
+def check_web_source_search_requirements() -> bool:
+    return True
 
 
 def check_youtube_search_requirements() -> bool:
@@ -196,6 +202,8 @@ async def web_deep_search_tool(
     top_k: int = 5,
     extract_top: int = 3,
     site: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+    source_profile: str = "",
 ) -> str:
     """Run a search-plus-extract workflow and return combined results."""
     if ensure_bundled_web_service():
@@ -206,10 +214,48 @@ async def web_deep_search_tool(
                 "top_k": top_k,
                 "extract_top": extract_top,
                 "site": site or "",
+                "sources": sources or [],
+                "source_profile": source_profile,
             },
         )
         if isinstance(remote, dict) and remote.get("success"):
             return json.dumps(remote, ensure_ascii=False)
+
+    if sources or source_profile or not _web_available():
+        search_result = bundled_web_search(
+            query,
+            limit=max(1, min(top_k, 10)),
+            site=site,
+            sources=sources,
+            source_profile=source_profile,
+        )
+        if not search_result.get("success"):
+            return json.dumps(search_result, ensure_ascii=False)
+
+        web_results = search_result.get("data", {}).get("web", [])
+        urls: List[str] = []
+        for item in web_results:
+            url = str(item.get("url") or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+            if len(urls) >= max(1, min(extract_top, 5)):
+                break
+
+        extracted_pages = []
+        if urls:
+            extracted_pages = await bundled_web_extract(urls)
+
+        return tool_result(
+            success=True,
+            mode="bundled-local-deep-search",
+            query=query,
+            site=site or "",
+            adapters_used=search_result.get("adapters_used", []),
+            source_profile=search_result.get("source_profile", "custom"),
+            grouped_results=search_result.get("grouped_results", {}),
+            search_results=web_results,
+            extracted_pages=extracted_pages,
+        )
 
     from tools.web_tools import web_extract_tool, web_search_tool
 
@@ -241,6 +287,29 @@ async def web_deep_search_tool(
         search_results=web_results,
         extracted_pages=extracted.get("results", []),
     )
+
+
+def web_source_search_tool(
+    query: str,
+    *,
+    limit: int = 8,
+    site: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+    source_profile: str = "mixed",
+) -> str:
+    """Search across grouped local source adapters and return merged plus per-source results."""
+    result = bundled_web_search(
+        query,
+        limit=max(1, min(limit, 10)),
+        site=site,
+        sources=sources,
+        source_profile=source_profile,
+    )
+    if result.get("success"):
+        result.setdefault("mode", "source-search")
+        result["query"] = query
+        result["site"] = site or ""
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _youtube_search_via_browser(query: str, limit: int, task_id: Optional[str]) -> str:
@@ -338,6 +407,7 @@ def web_inspect_tool(
     *,
     selector: str = "",
     selectors: Optional[List[str]] = None,
+    preset: str = "",
     include_console: bool = True,
     include_network: bool = True,
     include_images: bool = False,
@@ -346,6 +416,8 @@ def web_inspect_tool(
     full_snapshot: bool = False,
     expression: str = "",
     expressions: Optional[List[str]] = None,
+    action: Optional[Dict[str, Any]] = None,
+    capture_dom_diff: bool = False,
     task_id: Optional[str] = None,
 ) -> str:
     """Inspect a rendered page using the browser accessibility tree and DOM eval."""
@@ -358,12 +430,15 @@ def web_inspect_tool(
                 "url": url,
                 "selector": selector,
                 "selectors": selectors or [],
+                "preset": preset,
                 "include_console": include_console,
                 "include_network": include_network,
                 "include_images": include_images,
                 "include_storage": include_storage,
                 "expression": expression,
                 "expressions": expressions or [],
+                "action": action or {},
+                "capture_dom_diff": capture_dom_diff,
                 "clear_console": clear_console,
                 "full_snapshot": full_snapshot,
                 "task_id": task_id or "",
@@ -381,6 +456,7 @@ def web_inspect_tool(
                 "url": url,
                 "selector": selector,
                 "selectors": selectors or [],
+                "preset": preset,
                 "include_console": include_console,
                 "include_network": include_network,
                 "include_images": include_images,
@@ -389,6 +465,8 @@ def web_inspect_tool(
                 "full_snapshot": full_snapshot,
                 "expression": expression,
                 "expressions": expressions or [],
+                "action": action or {},
+                "capture_dom_diff": capture_dom_diff,
                 "task_id": task_id or "",
             }
         )
@@ -420,6 +498,24 @@ WEB_DEEP_SEARCH_SCHEMA = {
             "top_k": {"type": "integer", "description": "How many search results to collect", "default": 5, "minimum": 1, "maximum": 10},
             "extract_top": {"type": "integer", "description": "How many of the top results to fetch and extract", "default": 3, "minimum": 1, "maximum": 5},
             "site": {"type": "string", "description": "Optional site/domain filter, e.g. docs.python.org"},
+            "sources": {"type": "array", "items": {"type": "string"}, "description": "Optional source adapters, e.g. github, docs, stackoverflow, reddit, wikipedia, arxiv, hackernews"},
+            "source_profile": {"type": "string", "description": "Optional source profile such as mixed, code, research, community, or docs"},
+        },
+        "required": ["query"],
+    },
+}
+
+WEB_SOURCE_SEARCH_SCHEMA = {
+    "name": "web_source_search",
+    "description": "Search across grouped local source adapters such as general web, docs, GitHub, Stack Overflow, Reddit, Wikipedia, arXiv, and Hacker News. Returns both merged ranked hits and per-source grouped results.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "The search query"},
+            "limit": {"type": "integer", "description": "Maximum number of merged results to return", "default": 8, "minimum": 1, "maximum": 10},
+            "site": {"type": "string", "description": "Optional additional site/domain filter"},
+            "sources": {"type": "array", "items": {"type": "string"}, "description": "Optional explicit source adapters to query"},
+            "source_profile": {"type": "string", "description": "Optional source profile such as mixed, code, research, community, or docs", "default": "mixed"},
         },
         "required": ["query"],
     },
@@ -454,13 +550,14 @@ YOUTUBE_TRANSCRIPT_SCHEMA = {
 
 WEB_INSPECT_SCHEMA = {
     "name": "web_inspect",
-    "description": "Inspect a rendered web page using a higher-level development diagnostics workflow. Returns snapshot data, page metadata, multi-selector inspection, multi-expression evaluation, console messages, JS errors, summarized network activity, and optional storage/image capture. Use browser_console for raw ad hoc JavaScript evaluation.",
+    "description": "Inspect a rendered web page using a higher-level development diagnostics workflow. Supports presets for request-focused and triage workflows, multi-selector inspection, multi-expression evaluation, optional action-triggered DOM diffing, console messages, JS errors, summarized network activity, and optional storage/image capture. Use browser_console for raw ad hoc JavaScript evaluation.",
     "parameters": {
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "Optional URL to open before inspection. Leave empty to inspect the current browser page."},
             "selector": {"type": "string", "description": "Optional CSS selector to inspect in the current page"},
             "selectors": {"type": "array", "items": {"type": "string"}, "description": "Optional list of CSS selectors to inspect in one pass"},
+            "preset": {"type": "string", "description": "Optional inspect preset: overview, requests, triage, or dom-diff"},
             "include_console": {"type": "boolean", "description": "Include console messages and JS errors", "default": True},
             "include_network": {"type": "boolean", "description": "Include a best-effort network summary from the browser Performance API", "default": True},
             "include_images": {"type": "boolean", "description": "Include discovered page images with URL and alt text", "default": False},
@@ -469,6 +566,17 @@ WEB_INSPECT_SCHEMA = {
             "full_snapshot": {"type": "boolean", "description": "Request the full accessibility snapshot instead of the compact snapshot", "default": False},
             "expression": {"type": "string", "description": "Optional JavaScript expression to evaluate and include in the inspect response. For general raw JS usage, prefer browser_console."},
             "expressions": {"type": "array", "items": {"type": "string"}, "description": "Optional list of JavaScript expressions to evaluate and include in the inspect response."},
+            "action": {
+                "type": "object",
+                "description": "Optional browser action to run before collecting the final inspection state and DOM diff.",
+                "properties": {
+                    "kind": {"type": "string", "description": "One of click, type, press, or scroll"},
+                    "target": {"type": "string", "description": "Element ref, key, or scroll direction depending on the action kind"},
+                    "text": {"type": "string", "description": "Text payload for type actions"},
+                },
+                "required": ["kind"],
+            },
+            "capture_dom_diff": {"type": "boolean", "description": "Capture a before/after DOM diff when an action is provided", "default": False},
         },
         "required": [],
     },
@@ -500,10 +608,27 @@ registry.register(
         top_k=int(args.get("top_k", 5) or 5),
         extract_top=int(args.get("extract_top", 3) or 3),
         site=args.get("site") or None,
+        sources=args.get("sources") if isinstance(args.get("sources"), list) else None,
+        source_profile=args.get("source_profile", ""),
     ),
     check_fn=check_web_deep_search_requirements,
     is_async=True,
     emoji="🧭",
+    max_result_size_chars=100_000,
+)
+registry.register(
+    name="web_source_search",
+    toolset="webplus",
+    schema=WEB_SOURCE_SEARCH_SCHEMA,
+    handler=lambda args, **kw: web_source_search_tool(
+        query=args.get("query", ""),
+        limit=int(args.get("limit", 8) or 8),
+        site=args.get("site") or None,
+        sources=args.get("sources") if isinstance(args.get("sources"), list) else None,
+        source_profile=args.get("source_profile", "mixed"),
+    ),
+    check_fn=check_web_source_search_requirements,
+    emoji="🗂",
     max_result_size_chars=100_000,
 )
 registry.register(
@@ -540,6 +665,7 @@ registry.register(
         url=args.get("url", ""),
         selector=args.get("selector", ""),
         selectors=args.get("selectors") if isinstance(args.get("selectors"), list) else None,
+        preset=args.get("preset", ""),
         include_console=bool(args.get("include_console", True)),
         include_network=bool(args.get("include_network", True)),
         include_images=bool(args.get("include_images", False)),
@@ -548,6 +674,8 @@ registry.register(
         full_snapshot=bool(args.get("full_snapshot", False)),
         expression=args.get("expression", ""),
         expressions=args.get("expressions") if isinstance(args.get("expressions"), list) else None,
+        action=args.get("action") if isinstance(args.get("action"), dict) else None,
+        capture_dom_diff=bool(args.get("capture_dom_diff", False)),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_web_inspect_requirements,

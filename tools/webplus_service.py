@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 from tools.webplus_inspect import collect_browser_inspect_data
 from tools.webplus_backend import (
     fetch_youtube_transcript_local,
+    local_source_search,
     local_web_extract,
     local_web_search,
     youtube_transcript_support_available,
@@ -44,8 +45,16 @@ async def _deep_search(payload: Dict[str, Any]) -> Dict[str, Any]:
     top_k = max(1, min(int(payload.get("top_k", 5) or 5), 10))
     extract_top = max(1, min(int(payload.get("extract_top", 3) or 3), 5))
     site = str(payload.get("site") or "").strip() or None
+    sources = payload.get("sources") if isinstance(payload.get("sources"), list) else None
+    source_profile = str(payload.get("source_profile") or "").strip()
 
-    search = local_web_search(query, limit=top_k, site=site)
+    search = local_source_search(
+        query,
+        limit=top_k,
+        site=site,
+        sources=sources,
+        source_profile=source_profile,
+    )
     urls = []
     for item in search.get("data", {}).get("web", []):
         url = str(item.get("url") or "").strip()
@@ -63,6 +72,9 @@ async def _deep_search(payload: Dict[str, Any]) -> Dict[str, Any]:
         "mode": "bundled-service-deep-search",
         "query": query,
         "site": site or "",
+        "adapters_used": search.get("adapters_used", []),
+        "source_profile": search.get("source_profile", "custom"),
+        "grouped_results": search.get("grouped_results", {}),
         "search_results": search.get("data", {}).get("web", []),
         "extracted_pages": extracted,
     }
@@ -130,10 +142,14 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/v1/search":
-            result = local_web_search(
+            sources = payload.get("sources") if isinstance(payload.get("sources"), list) else None
+            source_profile = str(payload.get("source_profile") or "").strip()
+            result = local_source_search(
                 str(payload.get("query") or ""),
                 limit=max(1, min(int(payload.get("limit", 5) or 5), 10)),
                 site=str(payload.get("site") or "").strip() or None,
+                sources=sources,
+                source_profile=source_profile,
             )
             self._json_response(200, result)
             return

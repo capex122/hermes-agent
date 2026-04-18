@@ -30,6 +30,28 @@ from tools.website_policy import check_website_access
 
 logger = logging.getLogger(__name__)
 
+_SOURCE_ADAPTERS = {
+    "general": {"label": "general web", "query_prefix": ""},
+    "docs": {
+        "label": "documentation",
+        "query_prefix": "(site:docs.python.org OR site:developer.mozilla.org OR site:readthedocs.io OR site:learn.microsoft.com)",
+    },
+    "github": {"label": "GitHub", "query_prefix": "site:github.com"},
+    "stackoverflow": {"label": "Stack Overflow", "query_prefix": "site:stackoverflow.com"},
+    "reddit": {"label": "Reddit", "query_prefix": "site:reddit.com"},
+    "wikipedia": {"label": "Wikipedia", "query_prefix": "site:wikipedia.org"},
+    "arxiv": {"label": "arXiv", "query_prefix": "site:arxiv.org"},
+    "hackernews": {"label": "Hacker News", "query_prefix": "site:news.ycombinator.com"},
+}
+
+_SOURCE_PROFILES = {
+    "mixed": ["general", "docs", "github", "stackoverflow", "reddit", "wikipedia"],
+    "code": ["github", "docs", "stackoverflow"],
+    "research": ["general", "wikipedia", "arxiv", "hackernews"],
+    "community": ["reddit", "stackoverflow", "hackernews"],
+    "docs": ["docs", "wikipedia"],
+}
+
 _DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -179,14 +201,94 @@ def _normalize_remote_search_payload(payload: Any, limit: int) -> Optional[Dict[
         return None
 
     if isinstance(payload.get("data"), dict) and isinstance(payload["data"].get("web"), list):
-        return _normalize_search_results(payload["data"]["web"], limit, "bundled-service")
+        normalized = _normalize_search_results(payload["data"]["web"], limit, "bundled-service")
+        if isinstance(payload.get("grouped_results"), dict):
+            normalized["grouped_results"] = payload["grouped_results"]
+        if isinstance(payload.get("adapters_used"), list):
+            normalized["adapters_used"] = payload["adapters_used"]
+        if payload.get("source_profile"):
+            normalized["source_profile"] = str(payload["source_profile"])
+        return normalized
 
     for key in ("results", "items", "web"):
         values = payload.get(key)
         if isinstance(values, list):
-            return _normalize_search_results(values, limit, "bundled-service")
+            normalized = _normalize_search_results(values, limit, "bundled-service")
+            if isinstance(payload.get("grouped_results"), dict):
+                normalized["grouped_results"] = payload["grouped_results"]
+            if isinstance(payload.get("adapters_used"), list):
+                normalized["adapters_used"] = payload["adapters_used"]
+            if payload.get("source_profile"):
+                normalized["source_profile"] = str(payload["source_profile"])
+            return normalized
 
     return None
+
+
+def normalize_source_adapters(
+    sources: Optional[List[str]] = None,
+    *,
+    source_profile: str = "",
+) -> List[str]:
+    normalized: List[str] = []
+    profile_name = str(source_profile or "").strip().lower()
+
+    if sources:
+        for source in sources:
+            key = str(source or "").strip().lower()
+            if key in _SOURCE_ADAPTERS and key not in normalized:
+                normalized.append(key)
+    elif profile_name in _SOURCE_PROFILES:
+        normalized.extend(_SOURCE_PROFILES[profile_name])
+
+    if not normalized:
+        normalized.append("general")
+
+    return normalized
+
+
+def _build_search_query(
+    query: str,
+    *,
+    site: Optional[str] = None,
+    source_adapter: Optional[str] = None,
+) -> str:
+    parts: List[str] = []
+    adapter = str(source_adapter or "").strip().lower()
+    adapter_cfg = _SOURCE_ADAPTERS.get(adapter)
+    if adapter_cfg and adapter_cfg.get("query_prefix"):
+        parts.append(str(adapter_cfg["query_prefix"]))
+    if site:
+        parts.append(f"site:{site}")
+    parts.append(query.strip())
+    return " ".join(part for part in parts if part).strip()
+
+
+def _duckduckgo_html_search(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    response = httpx.get(
+        "https://html.duckduckgo.com/html/",
+        params={"q": query},
+        headers=_DEFAULT_HEADERS,
+        follow_redirects=True,
+        timeout=20,
+    )
+    response.raise_for_status()
+
+    html_text = response.text
+    items: List[Dict[str, Any]] = []
+    matches = list(_RESULT_LINK_RE.finditer(html_text))
+    for idx, match in enumerate(matches[: limit * 2]):
+        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(html_text), match.end() + 1800)
+        window = html_text[match.end() : next_start]
+        snippet_match = _RESULT_SNIPPET_RE.search(window)
+        items.append(
+            {
+                "title": _clean_html_fragment(match.group("title")),
+                "url": _decode_duckduckgo_href(match.group("href")),
+                "description": _clean_html_fragment(snippet_match.group("snippet")) if snippet_match else "",
+            }
+        )
+    return items
 
 
 async def _call_bundled_backend(path: str, payload: Dict[str, Any]) -> Optional[Any]:
@@ -249,50 +351,91 @@ def _call_bundled_backend_sync(path: str, payload: Dict[str, Any]) -> Optional[A
 
 def local_web_search(query: str, limit: int = 5, site: Optional[str] = None) -> Dict[str, Any]:
     """Run a free local DuckDuckGo HTML search and normalize the result."""
-    effective_query = query.strip()
-    if site:
-        effective_query = f"site:{site} {effective_query}".strip()
-
-    response = httpx.get(
-        "https://html.duckduckgo.com/html/",
-        params={"q": effective_query},
-        headers=_DEFAULT_HEADERS,
-        follow_redirects=True,
-        timeout=20,
+    return _normalize_search_results(
+        _duckduckgo_html_search(_build_search_query(query, site=site), limit=limit),
+        limit,
+        "bundled-local",
     )
-    response.raise_for_status()
 
-    html_text = response.text
-    items: List[Dict[str, Any]] = []
-    matches = list(_RESULT_LINK_RE.finditer(html_text))
-    for idx, match in enumerate(matches[: limit * 2]):
-        next_start = matches[idx + 1].start() if idx + 1 < len(matches) else min(len(html_text), match.end() + 1800)
-        window = html_text[match.end() : next_start]
-        snippet_match = _RESULT_SNIPPET_RE.search(window)
-        items.append(
-            {
-                "title": _clean_html_fragment(match.group("title")),
-                "url": _decode_duckduckgo_href(match.group("href")),
-                "description": _clean_html_fragment(snippet_match.group("snippet")) if snippet_match else "",
+
+def local_source_search(
+    query: str,
+    *,
+    limit: int = 5,
+    site: Optional[str] = None,
+    sources: Optional[List[str]] = None,
+    source_profile: str = "",
+) -> Dict[str, Any]:
+    """Run a grouped multi-source local search using adapter-specific DuckDuckGo queries."""
+    adapters = normalize_source_adapters(sources, source_profile=source_profile)
+    grouped_results: Dict[str, List[Dict[str, Any]]] = {}
+    merged_results: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    per_adapter_limit = max(2, min(limit, 10))
+
+    for adapter in adapters:
+        query_text = _build_search_query(query, site=site, source_adapter=adapter)
+        adapter_items = _duckduckgo_html_search(query_text, limit=per_adapter_limit)
+        adapter_results: List[Dict[str, Any]] = []
+        for item in adapter_items:
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            normalized_item = {
+                "title": str(item.get("title") or "").strip(),
+                "url": url,
+                "description": str(item.get("description") or "").strip(),
+                "source_adapter": adapter,
+                "source_label": _SOURCE_ADAPTERS.get(adapter, {}).get("label", adapter),
             }
-        )
+            adapter_results.append(normalized_item)
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            if len(merged_results) < limit:
+                normalized_item["position"] = len(merged_results) + 1
+                merged_results.append(normalized_item)
+        grouped_results[adapter] = adapter_results[:per_adapter_limit]
 
-    return _normalize_search_results(items, limit, "bundled-local")
+    return {
+        "success": True,
+        "data": {"web": merged_results[:limit]},
+        "source": "bundled-local",
+        "adapters_used": adapters,
+        "source_profile": str(source_profile or "").strip().lower() or "custom",
+        "grouped_results": grouped_results,
+    }
 
 
-def bundled_web_search(query: str, limit: int = 5, site: Optional[str] = None) -> Dict[str, Any]:
+def bundled_web_search(
+    query: str,
+    limit: int = 5,
+    site: Optional[str] = None,
+    *,
+    sources: Optional[List[str]] = None,
+    source_profile: str = "",
+) -> Dict[str, Any]:
     """Use the configured bundled backend when possible, else local search."""
+    adapters = normalize_source_adapters(sources, source_profile=source_profile)
     payload = {
         "query": query,
         "limit": limit,
         "site": site,
+        "sources": adapters,
+        "source_profile": str(source_profile or "").strip().lower(),
         "output_mode": "clean",
     }
     remote = _call_bundled_backend_sync("/v1/search", payload)
     normalized = _normalize_remote_search_payload(remote, limit) if remote is not None else None
     if normalized is not None:
         return normalized
-    return local_web_search(query, limit=limit, site=site)
+    return local_source_search(
+        query,
+        limit=limit,
+        site=site,
+        sources=adapters,
+        source_profile=source_profile,
+    )
 
 
 def _error_result(url: str, message: str, *, blocked_by_policy: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
