@@ -399,6 +399,194 @@ def build_search_intent_guidance(
     )
 
 
+# ---------------------------------------------------------------------------
+# Browser search playbook
+# ---------------------------------------------------------------------------
+
+# Trusted sources are grouped by category so the model can prefer them when
+# choosing which result to open.  Keep the per-line prefix terse — every line
+# lands in the system prompt on every turn for browser-capable surfaces.
+_TRUSTED_SOURCES_BY_CATEGORY: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "Code hosting & collaboration",
+        (
+            "github.com", "gitlab.com", "bitbucket.org",
+            "*.github.io (GitHub Pages)", "github.com/trending (GitHub Explore)",
+        ),
+    ),
+    (
+        "Package managers & registries",
+        (
+            "npmjs.com (npm)", "pypi.org (PyPI)", "nuget.org (NuGet)",
+            "packagist.org (Composer)", "formulae.brew.sh (Homebrew)",
+            "aur.archlinux.org (Arch AUR)", "packages.debian.org",
+            "packages.ubuntu.com",
+        ),
+    ),
+    (
+        "CDNs & library delivery",
+        ("cdnjs.com",),
+    ),
+    (
+        "Container & infrastructure",
+        ("hub.docker.com (Docker Hub)",),
+    ),
+    (
+        "Q&A, communities & learning",
+        (
+            "stackoverflow.com", "reddit.com", "freecodecamp.org",
+            "dev.to", "news.ycombinator.com (Hacker News)", "medium.com",
+        ),
+    ),
+    (
+        "Code sharing & web-based IDEs",
+        (
+            "codepen.io", "jsfiddle.net", "glitch.com",
+            "replit.com", "codesandbox.io",
+        ),
+    ),
+    (
+        "IDE / editor ecosystems",
+        (
+            "marketplace.visualstudio.com (VS Code extensions)",
+            "plugins.jetbrains.com (JetBrains plugins)",
+        ),
+    ),
+    (
+        "Image and media sources",
+        (
+            "unsplash.com", "pexels.com", "pixabay.com",
+            "commons.wikimedia.org (Wikimedia Commons)",
+            "openverse.org (WordPress Openverse)",
+            "archive.org (Internet Archive)",
+            "images.google.com (with license filters)",
+            "search.creativecommons.org",
+            "pinterest.com", "youtube.com",
+        ),
+    ),
+    (
+        "Core data-science libraries (Python) — official docs & repos",
+        (
+            "numpy.org", "pandas.pydata.org", "scipy.org",
+            "scikit-learn.org", "statsmodels.org",
+            "xgboost.readthedocs.io", "lightgbm.readthedocs.io",
+            "catboost.ai",
+            "pytorch.org", "tensorflow.org", "keras.io",
+            "huggingface.co (Transformers, datasets, models)",
+            "matplotlib.org", "seaborn.pydata.org", "plotly.com/python",
+            "dask.org", "vaex.io", "spark.apache.org (PySpark)",
+            "duckdb.org",
+            "jupyter.org (Notebook & JupyterLab)",
+            "opencv.org", "networkx.org", "pycaret.org",
+            "nltk.org", "spacy.io",
+            "mlflow.org", "airflow.apache.org",
+        ),
+    ),
+)
+
+
+def _format_trusted_sources_block() -> str:
+    """Render the trusted-source list as a compact, model-friendly block."""
+    lines: list[str] = []
+    for category, sources in _TRUSTED_SOURCES_BY_CATEGORY:
+        joined = ", ".join(sources)
+        lines.append(f"  - {category}: {joined}")
+    return "\n".join(lines)
+
+
+def build_browser_search_playbook(
+    available_tools: Optional[set[str] | list[str]] = None,
+) -> str:
+    """Build a detailed playbook for browser_search / browser_multi_search.
+
+    Returned only when at least one of ``browser_search`` or
+    ``browser_multi_search`` is in the available toolset — otherwise an
+    empty string so non-browser surfaces don't pay the prompt-cache cost.
+    """
+    available = set(available_tools or [])
+    has_search = "browser_search" in available
+    has_multi = "browser_multi_search" in available
+    if not (has_search or has_multi):
+        return ""
+
+    primary = "browser_multi_search" if has_multi else "browser_search"
+    secondary = "browser_search" if (has_multi and has_search) else None
+    has_get_images = "browser_get_images" in available
+    has_navigate = "browser_navigate" in available
+
+    primary_line = (
+        f"- Default to {primary} for any web search."
+    )
+    if secondary:
+        primary_line += (
+            f" Use {secondary} when you only need a single ranked list of "
+            "result links (faster, single page) instead of multi-source synthesis."
+        )
+
+    image_handling: list[str] = [
+        f"- For image / photo / picture / wallpaper / logo requests, call {primary} "
+        "with an image-flavoured query (e.g. 'lionel messi photo', 'tesla model 3 image'). "
+        "The tool auto-detects image intent and attaches an `image_results` array of "
+        "direct image URLs (suitable for native messaging-platform delivery).",
+        "- When `image_results` is present, pick the single best matching URL and "
+        "include it in your final reply as markdown image syntax `![caption](url)`. "
+        "The gateway will deliver it as a native photo on Telegram/Discord/Slack/WhatsApp. "
+        "Do NOT just paste the raw URL as text and do NOT describe the image instead "
+        "of sending it.",
+        "- If `image_results` is empty but `source_results` are present, open the most "
+        "relevant source URL with browser_navigate"
+        + (" and then call browser_get_images" if has_get_images else "")
+        + " to extract a usable image, then include it as `![caption](url)`.",
+    ]
+    if not has_get_images:
+        # If browser_get_images isn't in the surface, drop the second clause
+        image_handling[-1] = image_handling[-1].replace(
+            " and then call browser_get_images", ""
+        )
+
+    resilience_lines = [
+        "- Resilience: NEVER stop a search after a single site is blocked, returns "
+        "bot-detection, or yields no results. The tool already cycles through "
+        "DuckDuckGo → Bing → Yahoo and then through configured fallback URLs "
+        "internally. If the FINAL response still indicates failure, immediately retry "
+        "in the same turn with: (a) a refined query (drop noise words, add a year, "
+        "switch language), (b) a different web-capable tool if available, or "
+        "(c) browser_navigate to a known trusted source (see list below) and extract "
+        "the answer directly.",
+        "- Treat `bot_detection_detected=true` and `content_from_blocked_page_must_not_be_used=true` "
+        "as 'this single attempt failed' — they are NOT a reason to give up on the "
+        "user's request. Move on to the next engine, fallback URL, or trusted source "
+        "without asking the user for permission.",
+        "- Never report 'I cannot search the web' or 'all engines failed' until you "
+        "have tried at least: (1) the primary search tool with the original query, "
+        "(2) the same tool with a refined query, and (3) a direct browser_navigate to "
+        "a trusted source for the topic.",
+    ]
+    if not has_navigate:
+        resilience_lines[-1] = resilience_lines[-1].replace(
+            " and (3) a direct browser_navigate to a trusted source for the topic", ""
+        )
+
+    trusted_block = _format_trusted_sources_block()
+
+    sections: list[str] = [
+        "# Browser search playbook",
+        primary_line,
+        "- After a successful response, synthesise from `snapshot_excerpt` / `links` / "
+        "`source_results` directly. Do not navigate to every result — pick the 1-2 most "
+        "relevant ones only when the synthesis needs more depth.",
+        *image_handling,
+        *resilience_lines,
+        "- Prefer the trusted sources below when choosing which result to open or which "
+        "URL to navigate to directly. They are organised by topic so the model can "
+        "match them to the user's intent (code → GitHub/PyPI/npm; data science → "
+        "official library docs; images → Unsplash/Wikimedia/Pexels; community Q&A → "
+        "Stack Overflow/Reddit; etc.):",
+        trusted_block,
+    ]
+    return "\n".join(sections)
+
+
 def build_openai_model_execution_guidance(
     available_tools: Optional[set[str] | list[str]] = None,
 ) -> str:

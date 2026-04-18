@@ -94,7 +94,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, ACTION_EXECUTION_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, build_openai_model_execution_guidance, build_search_intent_guidance
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, ACTION_EXECUTION_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, build_openai_model_execution_guidance, build_search_intent_guidance, build_browser_search_playbook
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -3526,6 +3526,13 @@ class AIAgent:
             tool_guidance.append(build_search_intent_guidance(self.valid_tool_names))
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
+
+        # Detailed browser-search playbook (image_results, anti-bot resilience,
+        # trusted-source list).  Returns empty string when no browser-search
+        # tool is available, so non-browser surfaces don't pay the prompt cost.
+        browser_playbook = build_browser_search_playbook(self.valid_tool_names)
+        if browser_playbook:
+            prompt_parts.append(browser_playbook)
 
         nous_subscription_prompt = build_nous_subscription_prompt(self.valid_tool_names)
         if nous_subscription_prompt:

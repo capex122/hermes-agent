@@ -1161,6 +1161,68 @@ class TestSearchIntentGuidance:
         assert "browser_get_images" in text
 
 
+class TestBrowserSearchPlaybook:
+    """Detailed playbook for browser_search / browser_multi_search."""
+
+    def _playbook(self, tools):
+        from agent.prompt_builder import build_browser_search_playbook
+        return build_browser_search_playbook(tools)
+
+    def test_returns_empty_when_no_browser_search_tools(self):
+        assert self._playbook({"web_search", "search_files"}) == ""
+        assert self._playbook(set()) == ""
+
+    def test_emitted_when_browser_search_present(self):
+        text = self._playbook({"browser_search"})
+        assert text
+        assert "Browser search playbook" in text
+
+    def test_emitted_when_browser_multi_search_present(self):
+        text = self._playbook({"browser_multi_search"})
+        assert text
+        assert "browser_multi_search" in text
+
+    def test_image_handling_instructions_present(self):
+        text = self._playbook({"browser_search", "browser_get_images"})
+        assert "image_results" in text
+        assert "![caption](url)" in text
+        # Must instruct the model to send the image, not just describe it
+        assert "describe" in text.lower()
+
+    def test_resilience_instructions_present(self):
+        text = self._playbook({"browser_search"})
+        # The model must not stop on a single block / bot-detection event
+        assert "NEVER stop" in text or "never stop" in text.lower()
+        assert "bot_detection_detected" in text
+        assert "bot-detection" in text or "bot detection" in text
+
+    def test_trusted_sources_block_present(self):
+        text = self._playbook({"browser_multi_search"})
+        # Sample one entry per category to make sure the full list is rendered
+        for marker in (
+            "github.com",
+            "pypi.org",
+            "npmjs.com",
+            "cdnjs.com",
+            "hub.docker.com",
+            "stackoverflow.com",
+            "codepen.io",
+            "marketplace.visualstudio.com",
+            "unsplash.com",
+            "commons.wikimedia.org",
+            "numpy.org",
+            "pytorch.org",
+            "huggingface.co",
+            "duckdb.org",
+            "jupyter.org",
+        ):
+            assert marker in text, f"missing trusted source: {marker}"
+
+    def test_get_images_step_omitted_when_tool_unavailable(self):
+        text = self._playbook({"browser_search"})
+        assert "browser_get_images" not in text
+
+
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
