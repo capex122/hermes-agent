@@ -792,7 +792,7 @@ def build_advanced_capabilities_guidance(
 
     # ── Browser fingerprint rotation (anti-bot) ──────────────────────────
     if available & {"browser_search", "browser_multi_search", "browser_navigate"}:
-        sections.append(
+        fingerprint_text = (
             "# Anti-bot fingerprint rotation\n"
             "All three browser tools (`browser_navigate`, `browser_search`, "
             "`browser_multi_search`) accept an optional `fingerprint_seed` integer that "
@@ -813,12 +813,16 @@ def build_advanced_capabilities_guidance(
             "reuses the exact same persona. Switching seeds is the whole point.\n"
             "- The seed sticks to the session: once you set one for `browser_navigate`, "
             "subsequent calls within that session inherit it until you pass a different "
-            "seed or the session is reset.\n"
-            "- WHEN EVERY ENGINE FAILS WITH RATE-LIMITS / CAPTCHAS / EMPTY RESULTS: "
-            "the bottleneck is your IP, not the fingerprint. Switch to the "
-            "mubeng + `proxy_control` playbook below — that section has the "
-            "step-by-step."
+            "seed or the session is reset."
         )
+        if "proxy_control" in available:
+            fingerprint_text += (
+                "\n- WHEN EVERY ENGINE FAILS WITH RATE-LIMITS / CAPTCHAS / EMPTY "
+                "RESULTS: the bottleneck is your IP, not the fingerprint. Switch to "
+                "the mubeng + `proxy_control` playbook below — that section has the "
+                "step-by-step."
+            )
+        sections.append(fingerprint_text)
 
     # ── MCP self-extension ───────────────────────────────────────────────
     if "mcp_create_server" in available:
