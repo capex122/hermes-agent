@@ -2210,6 +2210,80 @@ def _build_fallback_urls(query: str) -> list[str]:
     ]
 
 
+def _attempt_browser_search_fallback_navigation(
+    query: str,
+    fallback_urls: list[str],
+    task_id: Optional[str] = None,
+    attempts: Optional[list[dict[str, Any]]] = None,
+    bot_blocked: bool = False,
+) -> tuple[Optional[dict[str, Any]], list[dict[str, str]]]:
+    """Try direct fallback URLs inside browser_search before returning failure.
+
+    Search-engine result pages are the most bot-sensitive part of browser_search.
+    When they fail, the model previously had to inspect fallback_urls and issue a
+    separate browser_navigate call. That extra agent step is fragile: models can
+    pick the wrong URL, strip query strings, or simply stop after the initial
+    error. We instead attempt those direct URLs here with a fresh browser session.
+    """
+    effective_task_id = task_id or "default"
+    fallback_attempts: list[dict[str, str]] = []
+
+    if not fallback_urls:
+        return None, fallback_attempts
+
+    # Reset the session used for the failed search engines. Search portals often
+    # leave behind challenge cookies or half-broken state that makes the direct
+    # fallback site fail immediately if we reuse the same browser instance.
+    try:
+        cleanup_browser(effective_task_id)
+    except Exception as cleanup_err:  # noqa: BLE001
+        logger.debug(
+            "browser_search fallback pre-cleanup failed for task %s: %s",
+            effective_task_id,
+            cleanup_err,
+        )
+
+    for fallback_url in fallback_urls:
+        nav_result = json.loads(browser_navigate(fallback_url, task_id=effective_task_id))
+        fallback_attempts.append(
+            {
+                "url": fallback_url,
+                "success": str(bool(nav_result.get("success"))).lower(),
+                "error": str(nav_result.get("error") or ""),
+            }
+        )
+        if nav_result.get("success"):
+            nav_result["search_query"] = query
+            nav_result["search_engine"] = "browser_direct_fallback"
+            nav_result["fallback_used"] = True
+            nav_result["fallback_navigation_url"] = fallback_url
+            nav_result["attempted_fallback_urls"] = [item["url"] for item in fallback_attempts]
+            nav_result["browser_attempted_engines"] = [attempt["engine"] for attempt in (attempts or [])]
+            nav_result["browser_failure_reason"] = "all browser search engines failed"
+            if bot_blocked:
+                nav_result["browser_bot_detection_detected"] = True
+            nav_result["next_step_hint"] = (
+                "Browser search engines were unusable, so browser_search opened a direct fallback "
+                "page for you. Continue from the current page using the returned snapshot, or call "
+                "browser_snapshot for a refreshed view."
+            )
+            return nav_result, fallback_attempts
+
+        # Retry the next fallback URL with a fresh browser session instead of
+        # carrying forward any challenge/cookie state from the failed site.
+        try:
+            cleanup_browser(effective_task_id)
+        except Exception as cleanup_err:  # noqa: BLE001
+            logger.debug(
+                "browser_search fallback cleanup after %s failed for task %s: %s",
+                fallback_url,
+                effective_task_id,
+                cleanup_err,
+            )
+
+    return None, fallback_attempts
+
+
 # ---------------------------------------------------------------------------
 # 15-engine list for browser_multi_search.  Engines are grouped so the most
 # bot-tolerant ones (HTML-only endpoints, smaller search portals) come first.
@@ -2702,6 +2776,16 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             "browser_search → web_search fallback failed: %s", str(fallback_err)[:200]
         )
 
+    direct_fallback_result, fallback_attempts = _attempt_browser_search_fallback_navigation(
+        query=normalized_query,
+        fallback_urls=fallback_urls,
+        task_id=task_id,
+        attempts=attempts,
+        bot_blocked=bot_blocked,
+    )
+    if direct_fallback_result:
+        return json.dumps(direct_fallback_result, ensure_ascii=False)
+
     return json.dumps(
         {
             "success": False,
@@ -2716,6 +2800,7 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             **({"bot_detection_detected": True} if bot_blocked else {}),
             **({"challenge_pattern": last_result.get("challenge_pattern")} if last_result.get("challenge_pattern") else {}),
             "fallback_urls": fallback_urls,
+            "fallback_attempts": fallback_attempts,
             "required_next_action": (
                 f"REQUIRED: call web_search with the same query, OR call browser_navigate on "
                 f"one of these URLs (each MUST include a path/query, not a bare hostname): "

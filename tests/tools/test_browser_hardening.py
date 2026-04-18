@@ -590,6 +590,13 @@ class TestBotDetectionHandling:
             bt,
             "_extract_search_source_results",
             return_value=([], None),
+        ), patch.object(
+            bt,
+            "_attempt_browser_search_fallback_navigation",
+            return_value=(None, []),
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"success": False, "error": "no backend configured"}),
         ):
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
@@ -624,6 +631,13 @@ class TestBotDetectionHandling:
             bt,
             "_extract_search_source_results",
             return_value=([], None),
+        ), patch.object(
+            bt,
+            "_attempt_browser_search_fallback_navigation",
+            return_value=(None, []),
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"success": False, "error": "no backend configured"}),
         ):
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
@@ -643,6 +657,13 @@ class TestBotDetectionHandling:
                 json.dumps({"success": False, "error": "Bing blocked", "bot_detection_detected": True}),
                 json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
             ],
+        ), patch.object(
+            bt,
+            "_attempt_browser_search_fallback_navigation",
+            return_value=(None, []),
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"success": False, "error": "no backend configured"}),
         ):
             result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
 
@@ -663,6 +684,13 @@ class TestBotDetectionHandling:
                 json.dumps({"success": False, "error": "Bing blocked", "bot_detection_detected": True}),
                 json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
             ],
+        ), patch.object(
+            bt,
+            "_attempt_browser_search_fallback_navigation",
+            return_value=(None, []),
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"success": False, "error": "no backend configured"}),
         ):
             result = json.loads(bt.browser_search("saudi clubs last 2 days", task_id="test"))
 
@@ -689,6 +717,13 @@ class TestBotDetectionHandling:
                 json.dumps({"success": False, "error": "timeout"}),
                 json.dumps({"success": False, "error": "timeout"}),
             ],
+        ), patch.object(
+            bt,
+            "_attempt_browser_search_fallback_navigation",
+            return_value=(None, []),
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"success": False, "error": "no backend configured"}),
         ):
             result = json.loads(bt.browser_search("some topic", task_id="test"))
 
@@ -767,8 +802,8 @@ class TestBotDetectionHandling:
         assert result["results_count"] == 1
         assert result["source_results"][0]["url"] == "https://example.com/fire-pdf"
 
-    def test_browser_search_falls_back_to_original_error_when_web_search_also_fails(self):
-        """If web_search has no backend configured, original failure JSON is preserved."""
+    def test_browser_search_directly_opens_fallback_url_when_web_search_also_fails(self):
+        """If web_search is unavailable, browser_search should try direct fallback URLs itself."""
         import json
         import tools.browser_tool as bt
 
@@ -779,6 +814,40 @@ class TestBotDetectionHandling:
                 json.dumps({"success": False, "error": "DDG fail"}),
                 json.dumps({"success": False, "error": "Bing fail"}),
                 json.dumps({"success": False, "error": "Yahoo fail"}),
+                json.dumps({
+                    "success": True,
+                    "url": "https://en.wikipedia.org/wiki/Special:Search?search=fire+pdf",
+                    "title": "fire pdf - Search results - Wikipedia",
+                    "snapshot": '- link "Firecrawl" [ref=e1]',
+                }),
+            ],
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"success": False, "error": "no backend configured"}),
+        ):
+            result = json.loads(bt.browser_search("fire pdf", task_id="test"))
+
+        assert result["success"] is True
+        assert result["fallback_used"] is True
+        assert result["search_engine"] == "browser_direct_fallback"
+        assert result["fallback_navigation_url"] == "https://en.wikipedia.org/wiki/Special:Search?search=fire+pdf"
+        assert result["browser_attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
+        assert result["attempted_fallback_urls"] == ["https://en.wikipedia.org/wiki/Special:Search?search=fire+pdf"]
+
+    def test_browser_search_returns_error_only_after_web_and_direct_fallbacks_fail(self):
+        """If every fallback path fails, keep the actionable failure payload."""
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "DDG fail"}),
+                json.dumps({"success": False, "error": "Bing fail"}),
+                json.dumps({"success": False, "error": "Yahoo fail"}),
+                json.dumps({"success": False, "error": "Wikipedia fail"}),
+                json.dumps({"success": False, "error": "Google fail"}),
             ],
         ), patch(
             "tools.web_tools.web_search_tool",
@@ -789,7 +858,18 @@ class TestBotDetectionHandling:
         assert result["success"] is False
         assert "Browser search failed" in result["error"]
         assert "fallback_urls" in result
-        # The improved next_action mentions both web_search and browser_navigate
+        assert result["fallback_attempts"] == [
+            {
+                "url": "https://en.wikipedia.org/wiki/Special:Search?search=fire+pdf",
+                "success": "false",
+                "error": "Wikipedia fail",
+            },
+            {
+                "url": "https://www.google.com/search?q=fire+pdf",
+                "success": "false",
+                "error": "Google fail",
+            },
+        ]
         assert "web_search" in result["required_next_action"]
 
 
