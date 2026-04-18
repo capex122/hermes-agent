@@ -858,6 +858,9 @@ class TestBotDetectionHandling:
                 json.dumps({"success": False, "error": "Bing blocked", "bot_detection_detected": True}),
                 json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
             ],
+        ), patch(
+            "tools.webplus_backend.local_web_search",
+            return_value={"success": False, "data": {"web": []}},
         ), patch("tools.web_tools.web_search_tool", return_value=fake_web_results):
             result = json.loads(bt.browser_search("fire pdf", task_id="test"))
 
@@ -897,6 +900,9 @@ class TestBotDetectionHandling:
                 json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
             ],
         ), patch(
+            "tools.webplus_backend.local_web_search",
+            return_value={"success": False, "data": {"web": []}},
+        ), patch(
             "tools.web_tools.web_search_tool",
             return_value=json.dumps({"error": "All web search backends failed. Last error: no backend configured"}),
         ), patch(
@@ -912,6 +918,99 @@ class TestBotDetectionHandling:
         assert result["browser_bot_detection_detected"] is True
         assert result["results_count"] == 1
         assert result["source_results"][0]["url"] == "https://www.firecrawl.dev/blog/fire-pdf-launch"
+
+    def test_browser_search_uses_free_local_duckduckgo_as_primary_fallback(self):
+        """The free DuckDuckGo HTML scrape must be the FIRST non-browser fallback.
+
+        Regression: when both the browser stack and paid backends (firecrawl)
+        are unavailable, the agent must still answer current-info queries
+        using the free local search path — not return [error].
+        """
+        import json
+        import tools.browser_tool as bt
+
+        fake_local_payload = {
+            "success": True,
+            "data": {
+                "web": [
+                    {
+                        "title": "Messi latest match",
+                        "url": "https://www.espn.com/soccer/messi-report",
+                        "description": "Match recap.",
+                    },
+                ]
+            },
+        }
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "DDG blocked"}),
+                json.dumps({"success": False, "error": "Bing blocked"}),
+                json.dumps({"success": False, "error": "Yahoo blocked"}),
+            ],
+        ), patch(
+            "tools.webplus_backend.local_web_search",
+            return_value=fake_local_payload,
+        ) as local_mock, patch(
+            "tools.web_tools.web_search_tool"
+        ) as web_mock, patch(
+            "tools.webplus_tool.web_source_search_tool"
+        ) as source_mock:
+            result = json.loads(bt.browser_search("messi latest match", task_id="test"))
+
+        assert result["success"] is True
+        assert result["fallback_used"] is True
+        assert result["search_engine"] == "local_web_search_fallback"
+        assert result["source_results"][0]["url"] == "https://www.espn.com/soccer/messi-report"
+        # Free local path must short-circuit before any paid backend is touched
+        local_mock.assert_called_once()
+        web_mock.assert_not_called()
+        source_mock.assert_not_called()
+
+    def test_browser_search_attaches_free_image_results_for_image_queries(self):
+        """Image queries must get image_results from the free Bing image scrape."""
+        import json
+        import tools.browser_tool as bt
+
+        fake_images = [
+            {
+                "title": "Messi photo",
+                "url": "https://example.com/messi.jpg",
+                "source": "https://example.com/messi-page",
+                "description": "",
+            }
+        ]
+        fake_local_payload = {
+            "success": True,
+            "data": {
+                "web": [
+                    {
+                        "title": "Messi page",
+                        "url": "https://example.com/messi-page",
+                        "description": "Profile page.",
+                    },
+                ]
+            },
+        }
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            return_value=json.dumps({"success": False, "error": "blocked"}),
+        ), patch.object(
+            bt, "_local_image_search", return_value=fake_images
+        ) as image_mock, patch(
+            "tools.webplus_backend.local_web_search",
+            return_value=fake_local_payload,
+        ):
+            result = json.loads(bt.browser_search("messi image", task_id="test"))
+
+        assert result["success"] is True
+        assert result["fallback_used"] is True
+        assert result["image_results"] == fake_images
+        image_mock.assert_called_once()
 
     def test_browser_search_directly_opens_fallback_url_when_web_search_also_fails(self):
         """If web_search is unavailable, browser_search should try direct fallback URLs itself."""
@@ -1329,6 +1428,7 @@ class TestBrowserMultiSearch:
 
         with patch.object(bt, "browser_navigate", return_value=self._make_fail_nav()), \
              patch.object(bt, "cleanup_browser", return_value=None), \
+             patch("tools.webplus_backend.local_web_search", return_value={"success": False, "data": {"web": []}}), \
              patch("tools.web_tools.web_search_tool", return_value=json.dumps({"success": False, "error": "no backend configured"})), \
              patch("tools.webplus_tool.web_source_search_tool", return_value=fake_source_results):
             result = json.loads(bt.browser_multi_search("messi latest match today", max_sites=3, task_id="test"))

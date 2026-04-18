@@ -2384,7 +2384,37 @@ def _run_non_browser_search_fallbacks(
     *,
     limit: int = 10,
 ) -> tuple[Optional[str], list[dict[str, str]]]:
-    """Try non-browser search fallbacks in priority order."""
+    """Try non-browser search fallbacks in priority order.
+
+    Order is chosen for resilience and zero-cost operation:
+    1. ``local_web_search`` — direct DuckDuckGo HTML scrape via ``httpx``.
+       Free, no API key, no extra dependencies, typically <5s.  Works even
+       when the browser stack and all paid backends are unavailable.
+    2. ``web_search_tool`` — the configured web search backend (Parallel,
+       Firecrawl, etc.).  Skipped silently when its dependencies/keys are
+       missing so the free path above remains the primary fallback.
+    3. ``web_source_search_tool`` — multi-adapter source search.  Slower
+       (multiple DDG queries) but useful when the previous paths return
+       nothing.
+    """
+    # 1) Free local DuckDuckGo HTML — always available, no keys, no deps
+    try:
+        from tools.webplus_backend import local_web_search
+
+        local_payload = local_web_search(query, limit=limit)
+        local_results = _normalize_non_browser_search_results(
+            (local_payload.get("data") or {}).get("web") or [],
+            limit=limit,
+        )
+        if local_payload.get("success") and local_results:
+            return "local_web_search_fallback", local_results
+    except Exception as fallback_err:  # noqa: BLE001
+        logger.warning(
+            "browser search → local_web_search fallback failed: %s",
+            str(fallback_err)[:200],
+        )
+
+    # 2) Configured web backend (Parallel/Firecrawl/etc.) — only if available
     try:
         from tools.web_tools import web_search_tool
 
@@ -2397,10 +2427,12 @@ def _run_non_browser_search_fallbacks(
         if web_payload.get("success") and web_results:
             return "web_search_fallback", web_results
     except Exception as fallback_err:  # noqa: BLE001
-        logger.warning(
-            "browser search → web_search fallback failed: %s", str(fallback_err)[:200]
+        logger.debug(
+            "browser search → web_search fallback unavailable: %s",
+            str(fallback_err)[:200],
         )
 
+    # 3) Multi-adapter source search — slower last-resort
     try:
         from tools.webplus_tool import web_source_search_tool
 
@@ -2414,7 +2446,8 @@ def _run_non_browser_search_fallbacks(
             return "web_source_search_fallback", source_results
     except Exception as fallback_err:  # noqa: BLE001
         logger.warning(
-            "browser search → web_source_search fallback failed: %s", str(fallback_err)[:200]
+            "browser search → web_source_search fallback failed: %s",
+            str(fallback_err)[:200],
         )
 
     return None, []
@@ -2424,6 +2457,77 @@ def _site_name_from_url(url: str, fallback_name: str) -> str:
     """Derive a concise site name from a URL for synthesis prompts."""
     hostname = (urllib.parse.urlparse(url).hostname or "").replace("www.", "")
     return hostname or fallback_name
+
+
+# Bing image-search regex: extract the ``murl`` (media URL = direct image
+# URL) field that Bing embeds as HTML-escaped JSON in each image tile.
+_BING_IMAGE_MURL_RE = re.compile(r"murl&quot;:&quot;(.*?)&quot;")
+_BING_IMAGE_TURL_RE = re.compile(r"turl&quot;:&quot;(.*?)&quot;")
+_BING_IMAGE_TITLE_RE = re.compile(r"t&quot;:&quot;(.*?)&quot;")
+_BING_IMAGE_PURL_RE = re.compile(r"purl&quot;:&quot;(.*?)&quot;")
+
+
+def _local_image_search(query: str, *, limit: int = 8) -> list[dict[str, str]]:
+    """Free Bing image search — no API key, no extra dependencies.
+
+    Scrapes the public Bing Images results page and extracts the embedded
+    ``murl`` (direct image URL) values.  Returns a list of
+    ``{"title", "url", "source", "description"}`` dicts where ``url`` is
+    the direct image URL (suitable for native Telegram photo send) and
+    ``source`` is the originating page.  Empty list on any failure — the
+    caller is expected to handle that gracefully.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    try:
+        response = requests.get(
+            "https://www.bing.com/images/search",
+            params={"q": query, "form": "HDRSC2", "first": "1"},
+            headers=headers,
+            timeout=15,
+        )
+        response.raise_for_status()
+        html = response.text
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("local_image_search failed: %s", str(exc)[:200])
+        return []
+
+    murls = _BING_IMAGE_MURL_RE.findall(html)
+    titles = _BING_IMAGE_TITLE_RE.findall(html)
+    purls = _BING_IMAGE_PURL_RE.findall(html)
+
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, raw_url in enumerate(murls):
+        url = raw_url.replace("\\u0026", "&").replace("\\/", "/").strip()
+        if not url or not url.startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        title = ""
+        if index < len(titles):
+            title = titles[index].replace("\\u0026", "&").strip()
+        source = ""
+        if index < len(purls):
+            source = purls[index].replace("\\u0026", "&").replace("\\/", "/").strip()
+        results.append(
+            {
+                "title": title,
+                "url": url,
+                "source": source,
+                "description": "",
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
 
 
 def _extract_browser_page_image_candidates(
@@ -3051,31 +3155,40 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             "search fallback. Use the URLs in source_results with browser_navigate or "
             "web_fetch/web_extract when available."
         )
+        image_results: list[dict[str, str]] = []
         if image_query:
-            next_step_hint += (
-                " Because the user asked for an image, open the most relevant source URL, "
-                "call browser_get_images on that page when available, and include the chosen "
-                "image URL as markdown image syntax ![caption](url)."
-            )
-        return json.dumps(
-            {
-                "success": True,
-                "search_query": normalized_query,
-                "search_engine": search_engine,
-                "fallback_used": True,
-                "browser_attempted_engines": [attempt["engine"] for attempt in attempts],
-                "browser_failure_reason": last_result.get("error") or "all browser engines failed",
-                **(
-                    {"browser_bot_detection_detected": True}
-                    if bot_blocked
-                    else {}
-                ),
-                "source_results": results,
-                "results_count": len(results),
-                "next_step_hint": next_step_hint,
-            },
-            ensure_ascii=False,
-        )
+            image_results = _local_image_search(normalized_query, limit=8)
+            if image_results:
+                next_step_hint += (
+                    " Image results are attached as image_results — pick the best URL "
+                    "and include it in your final answer as markdown image syntax "
+                    "![caption](url) so the gateway can deliver it natively."
+                )
+            else:
+                next_step_hint += (
+                    " Because the user asked for an image, open the most relevant source URL, "
+                    "call browser_get_images on that page when available, and include the chosen "
+                    "image URL as markdown image syntax ![caption](url)."
+                )
+        payload = {
+            "success": True,
+            "search_query": normalized_query,
+            "search_engine": search_engine,
+            "fallback_used": True,
+            "browser_attempted_engines": [attempt["engine"] for attempt in attempts],
+            "browser_failure_reason": last_result.get("error") or "all browser engines failed",
+            **(
+                {"browser_bot_detection_detected": True}
+                if bot_blocked
+                else {}
+            ),
+            "source_results": results,
+            "results_count": max(len(results), len(image_results)),
+            "next_step_hint": next_step_hint,
+        }
+        if image_results:
+            payload["image_results"] = image_results
+        return json.dumps(payload, ensure_ascii=False)
 
     fallback_attempts: list[dict[str, str]] = []
     if image_query:
