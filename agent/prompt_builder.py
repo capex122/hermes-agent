@@ -176,7 +176,10 @@ ACTION_EXECUTION_GUIDANCE = (
     "immediately instead of asking whether they want you to do it.\n"
     "- Do not restate an available action as a future option after the user has already "
     "asked for it.\n"
-    "- If the request is safe and unambiguous, make the tool call in the same turn."
+    "- If the request is safe and unambiguous, make the tool call in the same turn.\n"
+    "- If live-lookup tools are available, do not answer with a generic refusal such as "
+    "'I cannot provide real-time information' or tell the user to check a website/app "
+    "before you attempt the lookup tools."
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
@@ -340,6 +343,9 @@ def build_search_intent_guidance(
         "that is not already provided in the conversation (for example: sports scores or "
         "match results from the last few days, recent news, current prices, current "
         f"versions, or live schedules), proactively look it up: {web_lookup_guidance}.\n"
+        "- When live-lookup tools are available, do not respond to those current/recent "
+        "fact questions with a generic limitation such as 'I cannot provide real-time "
+        "information' or 'check a sports website/app' before you try the lookup tools.\n"
         "- If a lookup tool fails, returns no useful results, or reports an "
         "availability/configuration problem, do not stop there. Retry with a better query "
         "or another available web-capable tool in the same turn before saying you cannot "

@@ -687,6 +687,7 @@ class TestBuildSystemPrompt:
         assert "default to a web search rather than a file search" in prompt
         assert "sports scores or match results from the last few days" in prompt
         assert "before saying you cannot search" in prompt
+        assert "cannot provide real-time information" in prompt
 
     def test_search_intent_guidance_uses_browser_when_web_search_missing(self):
         with (

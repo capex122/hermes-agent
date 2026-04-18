@@ -1000,6 +1000,10 @@ class TestToolUseEnforcementGuidance:
     def test_enforcement_models_is_tuple(self):
         assert isinstance(TOOL_USE_ENFORCEMENT_MODELS, tuple)
 
+    def test_action_execution_guidance_blocks_real_time_refusal(self):
+        assert "cannot provide real-time information" in ACTION_EXECUTION_GUIDANCE
+        assert "check a website/app" in ACTION_EXECUTION_GUIDANCE
+
 
 class TestOpenAIModelExecutionGuidance:
     """Tests for GPT/Codex-specific execution discipline guidance."""
@@ -1072,6 +1076,11 @@ class TestSearchIntentGuidance:
         text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})
         assert "sports scores or match results from the last few days" in text
         assert "proactively look it up: use web_search" in text
+
+    def test_guidance_blocks_generic_real_time_refusal_when_lookup_tools_exist(self):
+        text = build_search_intent_guidance({"web_search", "browser_search", "browser_navigate"})
+        assert "cannot provide real-time information" in text
+        assert "check a sports website/app" in text
 
     def test_guidance_retries_lookup_before_giving_up(self):
         text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})
