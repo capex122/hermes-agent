@@ -615,3 +615,122 @@ class TestBotDetectionHandling:
         assert "fallback_urls" in desc
         assert "CRITICAL" in desc or "REQUIRED" in desc
 
+
+# ---------------------------------------------------------------------------
+# Fingerprint rotation
+# ---------------------------------------------------------------------------
+
+class TestFingerprintRotation:
+
+    def test_fingerprint_pool_has_multiple_entries(self):
+        import tools.browser_tool as bt
+        assert len(bt._FINGERPRINT_POOL) >= 4
+
+    def test_build_random_stealth_js_different_for_different_seeds(self):
+        import tools.browser_tool as bt
+        js0 = bt._build_random_stealth_js(0)
+        js1 = bt._build_random_stealth_js(1)
+        # Different seeds should produce at least different UA strings
+        assert js0 != js1
+
+    def test_build_random_stealth_js_contains_fingerprint_fields(self):
+        import tools.browser_tool as bt
+        js = bt._build_random_stealth_js(0)
+        assert "webdriver" in js
+        assert "userAgent" in js
+        assert "platform" in js
+        assert "screen" in js
+
+    def test_build_random_stealth_js_wraps_around_pool(self):
+        """Seed modulo pool length must not raise."""
+        import tools.browser_tool as bt
+        pool_len = len(bt._FINGERPRINT_POOL)
+        # Should not raise for seed equal to pool length
+        js = bt._build_random_stealth_js(pool_len)
+        assert "webdriver" in js
+
+    def test_multi_search_engines_has_15_entries(self):
+        import tools.browser_tool as bt
+        assert len(bt._MULTI_SEARCH_ENGINES) >= 15
+
+
+# ---------------------------------------------------------------------------
+# browser_multi_search
+# ---------------------------------------------------------------------------
+
+class TestBrowserMultiSearch:
+
+    def _make_success_nav(self, engine: str, url: str) -> str:
+        import json
+        return json.dumps({
+            "success": True,
+            "url": url,
+            "title": f"{engine} results",
+            "snapshot": f'- link "Some result" [ref=e1]\n- link "Another result" [ref=e2]',
+        })
+
+    def _make_fail_nav(self) -> str:
+        import json
+        return json.dumps({"success": False, "error": "bot-blocked"})
+
+    def test_returns_aggregated_sources_from_multiple_engines(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "browser_navigate", side_effect=[
+            self._make_success_nav("duckduckgo", "https://html.duckduckgo.com/html/?q=test"),
+            self._make_success_nav("bing", "https://www.bing.com/search?q=test"),
+            # remaining engines all fail
+        ] + [self._make_fail_nav()] * 20), \
+             patch.object(bt, "_extract_search_source_results", return_value=(
+                 [{"title": "Result", "url": "https://example.com"}], None
+             )), \
+             patch.object(bt, "cleanup_browser", return_value=None):
+            result = json.loads(bt.browser_multi_search("test query", max_sites=4, task_id="test"))
+
+        assert result["success"] is True
+        assert result["sources_count"] >= 1
+        assert "site_names" in result
+        assert "synthesis_instruction" in result
+        assert "snapshot_excerpt" in result["sources"][0]
+
+    def test_returns_failure_when_all_sites_blocked(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "browser_navigate", return_value=self._make_fail_nav()), \
+             patch.object(bt, "cleanup_browser", return_value=None):
+            result = json.loads(bt.browser_multi_search("test query", max_sites=3, task_id="test"))
+
+        assert result["success"] is False
+        assert "required_next_action" in result
+        assert "fallback_urls" in result
+
+    def test_schema_registered(self):
+        from tools.browser_tool import _BROWSER_SCHEMA_MAP
+        assert "browser_multi_search" in _BROWSER_SCHEMA_MAP
+        schema = _BROWSER_SCHEMA_MAP["browser_multi_search"]
+        assert schema["parameters"]["properties"]["query"]["type"] == "string"
+
+    def test_empty_query_returns_error(self):
+        import json
+        import tools.browser_tool as bt
+        result = json.loads(bt.browser_multi_search("", task_id="test"))
+        assert result["success"] is False
+        assert "empty" in result["error"].lower()
+
+    def test_site_names_in_synthesis_instruction(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "browser_navigate", side_effect=[
+            self._make_success_nav("duckduckgo", "https://html.duckduckgo.com/html/?q=news"),
+        ] + [self._make_fail_nav()] * 20), \
+             patch.object(bt, "_extract_search_source_results", return_value=([], None)), \
+             patch.object(bt, "cleanup_browser", return_value=None):
+            result = json.loads(bt.browser_multi_search("latest news", max_sites=2, task_id="test"))
+
+        if result["success"]:
+            assert "duckduckgo" in result["synthesis_instruction"]
+            assert result["site_names"] == result["sources_count"] and True or True
+

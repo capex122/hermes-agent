@@ -238,9 +238,15 @@ def _build_current_facts_tool_guidance(available_tools: Optional[set[str] | list
         if name in available
     ]
     has_browser_search = "browser_search" in available
+    has_browser_multi_search = "browser_multi_search" in available
 
     browser_guidance = ""
-    if has_browser_search:
+    if has_browser_multi_search:
+        browser_guidance = "use browser_multi_search for comprehensive multi-source results"
+        if "browser_navigate" in available:
+            browser_guidance += ", then browser_navigate for follow-up interaction"
+        browser_guidance += "; avoid Google search pages because they often trigger bot detection"
+    elif has_browser_search:
         browser_guidance = "use browser_search"
         if "browser_navigate" in available:
             browser_guidance += " for search, then use browser_navigate"
@@ -293,6 +299,7 @@ def _build_missing_context_tool_examples(available_tools: Optional[set[str] | li
             "web_deep_search",
             "web_fetch",
             "web_extract",
+            "browser_multi_search",
             "browser_search",
             "browser_navigate",
             "browser_snapshot",
@@ -339,6 +346,10 @@ def build_search_intent_guidance(
         "- If the user explicitly asks to search the web, look something up online, or "
         f"find current information, execute that search immediately: {web_lookup_guidance}.\n"
         "- Do not ask for confirmation when the user has already requested the search.\n"
+        "- When browser_multi_search succeeds, synthesise ALL 'snapshot_excerpt' and "
+        "'links' fields into a comprehensive answer, then list the consulted site names "
+        "at the end of your response. Do not navigate further unless the user asks for "
+        "more detail on a specific link.\n"
         "- When browser_search returns result URLs or clickable refs, navigate to those "
         "pages immediately without asking the user which one to open — pick the most "
         "relevant result and navigate to it in the same turn.\n"

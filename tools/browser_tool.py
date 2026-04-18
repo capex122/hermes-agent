@@ -282,6 +282,116 @@ _STEALTH_JS = r"""
 })();
 """
 
+# ---------------------------------------------------------------------------
+# Fingerprint rotation pool — each entry is a (user_agent, platform,
+# vendor, screen_w, screen_h, timezone) tuple.  One is picked at random
+# per browser_search attempt so consecutive retries present different
+# fingerprints to bot-detection scripts.
+# ---------------------------------------------------------------------------
+_FINGERPRINT_POOL = [
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Win32", "Google Inc.", 1920, 1080, "America/New_York",
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Win32", "Google Inc.", 1440, 900, "Europe/London",
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "MacIntel", "Google Inc.", 2560, 1600, "America/Los_Angeles",
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+        "MacIntel", "Apple Computer, Inc.", 2560, 1440, "Europe/Paris",
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "Win32", "", 1920, 1080, "Asia/Dubai",
+    ),
+    (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Linux x86_64", "Google Inc.", 1920, 1080, "Europe/Berlin",
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+        "Win32", "Google Inc.", 1366, 768, "America/Chicago",
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.122 Safari/537.36",
+        "MacIntel", "Google Inc.", 1680, 1050, "Asia/Tokyo",
+    ),
+]
+
+
+def _build_random_stealth_js(seed: int = 0) -> str:
+    """Return stealth JS with a fingerprint picked from the pool (deterministic by seed)."""
+    fp = _FINGERPRINT_POOL[seed % len(_FINGERPRINT_POOL)]
+    ua, platform, vendor, sw, sh, tz = fp
+    ua_escaped = ua.replace("'", "\\'")
+    tz_escaped = tz.replace("'", "\\'")
+    vendor_escaped = vendor.replace("'", "\\'")
+    return f"""
+(function() {{
+    try {{ Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined, configurable: true }}); }} catch(_) {{}}
+    try {{
+        Object.defineProperty(navigator, 'userAgent', {{ get: () => '{ua_escaped}', configurable: true }});
+    }} catch(_) {{}}
+    try {{
+        Object.defineProperty(navigator, 'platform', {{ get: () => '{platform}', configurable: true }});
+    }} catch(_) {{}}
+    try {{
+        Object.defineProperty(navigator, 'vendor', {{ get: () => '{vendor_escaped}', configurable: true }});
+    }} catch(_) {{}}
+    try {{
+        if (!navigator.plugins.length) {{
+            const fake = [
+                {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
+                {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' }},
+                {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }},
+            ];
+            Object.defineProperty(navigator, 'plugins', {{ get: () => fake, configurable: true }});
+        }}
+    }} catch(_) {{}}
+    try {{
+        if (!navigator.languages || !navigator.languages.length) {{
+            Object.defineProperty(navigator, 'languages', {{ get: () => ['en-US', 'en'], configurable: true }});
+        }}
+    }} catch(_) {{}}
+    try {{
+        if (!window.chrome) {{
+            window.chrome = {{ runtime: {{}}, loadTimes: function(){{}}, csi: function(){{}}, app: {{}} }};
+        }}
+    }} catch(_) {{}}
+    try {{
+        Object.defineProperty(screen, 'width',  {{ get: () => {sw}, configurable: true }});
+        Object.defineProperty(screen, 'height', {{ get: () => {sh}, configurable: true }});
+        Object.defineProperty(screen, 'availWidth',  {{ get: () => {sw}, configurable: true }});
+        Object.defineProperty(screen, 'availHeight', {{ get: () => {sh - 40}, configurable: true }});
+    }} catch(_) {{}}
+    try {{
+        const origDTF = Intl.DateTimeFormat;
+        Intl.DateTimeFormat = function(locale, opts) {{
+            if (!opts || !opts.timeZone) {{
+                opts = Object.assign({{timeZone: '{tz_escaped}'}}, opts);
+            }}
+            return new origDTF(locale, opts);
+        }};
+        Intl.DateTimeFormat.prototype = origDTF.prototype;
+        Intl.DateTimeFormat.supportedLocalesOf = origDTF.supportedLocalesOf;
+    }} catch(_) {{}}
+    try {{
+        const origQuery = window.navigator.permissions && window.navigator.permissions.query;
+        if (origQuery) {{
+            window.navigator.permissions.query = (params) =>
+                params.name === 'notifications'
+                    ? Promise.resolve({{ state: Notification.permission }})
+                    : origQuery.call(window.navigator.permissions, params);
+        }}
+    }} catch(_) {{}}
+}})();
+"""
+
 _BROWSER_SEARCH_ENGINES = (
     ("duckduckgo", "https://html.duckduckgo.com/html/?q={query}"),
     ("bing", "https://www.bing.com/search?q={query}"),
@@ -850,6 +960,33 @@ BROWSER_TOOL_SCHEMAS = [
                 "query": {
                     "type": "string",
                     "description": "The web search query to look up in the browser"
+                }
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "browser_multi_search",
+        "description": (
+            "Search up to 15 different sites simultaneously for a query and return aggregated "
+            "results from all of them. Use this when you need comprehensive information from "
+            "multiple sources (e.g., sports results, breaking news, current events). "
+            "Each source provides a snapshot excerpt and structured links. "
+            "After this tool returns, synthesise all 'snapshot_excerpt' fields into a detailed "
+            "answer and list the site names consulted at the end. "
+            "This tool uses a different browser fingerprint per site to reduce bot detection."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The web search query to look up across multiple sites"
+                },
+                "max_sites": {
+                    "type": "integer",
+                    "description": "Maximum number of sites to search (1-15, default 15)",
+                    "default": 15
                 }
             },
             "required": ["query"]
@@ -1548,82 +1685,31 @@ def _build_fallback_urls(query: str) -> list[str]:
     ]
 
 
-_SPORTS_KEYWORDS = frozenset({
-    "football", "soccer", "match", "matches", "game", "games", "score", "scores",
-    "result", "results", "goal", "goals", "club", "clubs", "league", "team", "teams",
-    "played", "fixture", "fixtures", "standings", "table", "tournament", "cup",
-    "champions", "premier", "serie", "bundesliga", "laliga", "ligue",
-    "saudi", "sapl", "spl",
-})
-_NEWS_KEYWORDS = frozenset({
-    "news", "latest", "current", "today", "yesterday", "recent", "happened",
-    "announced", "reported", "update", "breaking",
-})
-
-
-def _build_fallback_urls(query: str) -> list[str]:
-    """Return direct navigation URLs matched to the query topic."""
-    words = set((query or "").lower().split())
-    encoded = urllib.parse.quote_plus(" ".join((query or "").split()))
-    if words & _SPORTS_KEYWORDS:
-        saudi_specific = any(w in words for w in ("saudi", "sapl", "spl"))
-        return [
-            "https://www.flashscore.com/football/saudi-arabia/" if saudi_specific
-            else f"https://www.flashscore.com/search/#{encoded}",
-            "https://www.livescore.com/en/football/saudi-arabia/" if saudi_specific
-            else "https://www.livescore.com/en/football/",
-            "https://www.bbc.com/sport/football",
-            f"https://www.google.com/search?q={encoded}",
-        ]
-    if words & _NEWS_KEYWORDS:
-        return [
-            "https://www.bbc.com/news",
-            "https://apnews.com",
-            "https://www.reuters.com",
-            f"https://www.google.com/search?q={encoded}",
-        ]
-    return [
-        f"https://en.wikipedia.org/wiki/Special:Search?search={encoded}",
-        f"https://www.google.com/search?q={encoded}",
-    ]
-
-
-_SPORTS_KEYWORDS = frozenset({
-    "football", "soccer", "match", "matches", "game", "games", "score", "scores",
-    "result", "results", "goal", "goals", "club", "clubs", "league", "team", "teams",
-    "played", "fixture", "fixtures", "standings", "table", "tournament", "cup",
-    "champions", "premier", "serie", "bundesliga", "laliga", "ligue",
-    "saudi", "sapl", "spl",
-})
-_NEWS_KEYWORDS = frozenset({
-    "news", "latest", "current", "today", "yesterday", "recent", "happened",
-    "announced", "reported", "update", "breaking",
-})
-
-
-def _build_fallback_urls(query: str) -> list[str]:
-    """Return direct navigation URLs suited to the query topic."""
-    words = set((query or "").lower().split())
-    encoded = urllib.parse.quote_plus(" ".join((query or "").split()))
-    if words & _SPORTS_KEYWORDS:
-        return [
-            f"https://www.flashscore.com/search/#{encoded}",
-            "https://www.flashscore.com/football/saudi-arabia/"
-            if any(w in words for w in ("saudi", "sapl", "spl")) else
-            f"https://www.flashscore.com/football/",
-            f"https://www.livescore.com/en/football/",
-            f"https://www.bbc.com/sport/football",
-        ]
-    if words & _NEWS_KEYWORDS:
-        return [
-            f"https://www.bbc.com/news",
-            f"https://apnews.com",
-            f"https://www.reuters.com",
-        ]
-    return [
-        f"https://en.wikipedia.org/wiki/Special:Search?search={encoded}",
-        f"https://www.bbc.com",
-    ]
+# ---------------------------------------------------------------------------
+# 15-engine list for browser_multi_search.  Engines are grouped so the most
+# bot-tolerant ones (HTML-only endpoints, smaller search portals) come first.
+# The model picks sites from the returned `sources` list and navigates to
+# the most relevant result pages on its own.
+# ---------------------------------------------------------------------------
+_MULTI_SEARCH_ENGINES: list[tuple[str, str]] = [
+    # --- bot-tolerant HTML endpoints ---
+    ("duckduckgo",  "https://html.duckduckgo.com/html/?q={query}"),
+    ("bing",        "https://www.bing.com/search?q={query}"),
+    ("yahoo",       "https://search.yahoo.com/search?p={query}"),
+    ("brave",       "https://search.brave.com/search?q={query}"),
+    ("startpage",   "https://www.startpage.com/search?q={query}"),
+    ("ecosia",      "https://www.ecosia.org/search?q={query}"),
+    ("mojeek",      "https://www.mojeek.com/search?q={query}"),
+    ("metager",     "https://metager.org/meta/meta.ger3?eingabe={query}&language=en"),
+    ("ask",         "https://www.ask.com/web?q={query}"),
+    ("aol",         "https://search.aol.com/search?q={query}"),
+    # --- direct authoritative sites (sports/news) ---
+    ("flashscore",  "https://www.flashscore.com/search/#{query}"),
+    ("bbc_sport",   "https://www.bbc.com/sport/football"),
+    ("espn",        "https://www.espn.com/search/results?q={query}"),
+    ("apnews",      "https://apnews.com/search?q={query}"),
+    ("reuters",     "https://www.reuters.com/search/news?query={query}"),
+]
 
 
 def _google_search_guidance(url: str) -> str | None:
@@ -1881,10 +1967,14 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             response["stealth_features"] = active_features
 
         # Apply stealth JS patches in local mode to mask headless fingerprints.
+        # Use a random fingerprint seed derived from the session call counter so
+        # consecutive navigations (and retries) present different profiles.
         # Best-effort — silently ignored on failure or non-local backends.
         if _is_local_backend():
             try:
-                _run_browser_command(effective_task_id, "eval", [_STEALTH_JS], timeout=5)
+                import time as _time
+                _fp_seed = int(_time.time() * 1000) % len(_FINGERPRINT_POOL)
+                _run_browser_command(effective_task_id, "eval", [_build_random_stealth_js(_fp_seed)], timeout=5)
             except Exception:
                 pass
 
@@ -2013,6 +2103,122 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str] = None) -> str:
+    """Search up to 15 different sites and aggregate all results for the model.
+
+    Each site that responds successfully contributes a `source` entry with:
+      - engine name
+      - url visited
+      - snapshot excerpt (first 1500 chars)
+      - structured links found on the page
+
+    The model then synthesises all sources and returns a summary to the user
+    that includes the site names at the end.
+    """
+    import time as _time
+
+    normalized_query = " ".join((query or "").split())
+    if not normalized_query:
+        return json.dumps({"success": False, "error": "Search query cannot be empty"}, ensure_ascii=False)
+
+    encoded_query = urllib.parse.quote_plus(normalized_query)
+
+    # Build target list: all engines, limited to max_sites
+    all_engines: list[tuple[str, str]] = [
+        (name, url_tpl.format(query=encoded_query))
+        for name, url_tpl in _MULTI_SEARCH_ENGINES[:max_sites]
+    ]
+
+    # Add topic-specific direct sites if query is sports/news
+    extra_sites = _build_fallback_urls(normalized_query)
+    for extra in extra_sites:
+        if len(all_engines) >= max_sites:
+            break
+        # derive a friendly engine name from the hostname
+        parsed_extra = urllib.parse.urlparse(extra)
+        engine_name = (parsed_extra.hostname or "direct").replace("www.", "")
+        if engine_name not in {n for n, _ in all_engines}:
+            all_engines.append((engine_name, extra))
+
+    sources: list[dict[str, Any]] = []
+    blocked_engines: list[str] = []
+    fp_seed_base = int(_time.time() * 1000)
+
+    for idx, (engine, url) in enumerate(all_engines):
+        # Reset session between engines to get a fresh fingerprint
+        try:
+            cleanup_browser(task_id or "default")
+        except Exception:
+            pass
+
+        # Inject a different fingerprint for each site attempt
+        fp_seed = (fp_seed_base + idx) % len(_FINGERPRINT_POOL)
+        try:
+            if _is_local_backend():
+                _run_browser_command(task_id or "default", "eval", [_build_random_stealth_js(fp_seed)], timeout=5)
+        except Exception:
+            pass
+
+        result = json.loads(browser_navigate(url, task_id=task_id))
+        if not result.get("success"):
+            blocked_engines.append(engine)
+            continue
+
+        # Check bot detection
+        title = str(result.get("title") or "")
+        snapshot = str(result.get("snapshot") or "")
+        final_url = str(result.get("url") or url)
+        if _detect_bot_detection_signal(title, snapshot, final_url) or result.get("bot_detection_detected"):
+            blocked_engines.append(engine)
+            continue
+
+        # Extract structured links
+        links: list[dict[str, str]] = []
+        try:
+            links, _ = _extract_search_source_results(engine, task_id)
+        except Exception:
+            pass
+        if not links:
+            links = _extract_snapshot_clickable_results(snapshot)
+
+        sources.append({
+            "engine": engine,
+            "url": final_url,
+            "title": title,
+            "snapshot_excerpt": snapshot[:1500],
+            "links": links[:12],
+            "links_count": len(links),
+        })
+
+    if not sources:
+        fallback_urls = _build_fallback_urls(normalized_query)
+        return json.dumps({
+            "success": False,
+            "error": f"All {len(all_engines)} sites were bot-blocked or failed.",
+            "blocked_engines": blocked_engines,
+            "fallback_urls": fallback_urls,
+            "required_next_action": (
+                f"REQUIRED: call browser_navigate immediately on one of these URLs — "
+                f"do NOT report failure to the user: {', '.join(fallback_urls[:2])}"
+            ),
+        }, ensure_ascii=False)
+
+    site_names = [s["engine"] for s in sources]
+    return json.dumps({
+        "success": True,
+        "search_query": normalized_query,
+        "sources_count": len(sources),
+        "blocked_count": len(blocked_engines),
+        "sources": sources,
+        "site_names": site_names,
+        "synthesis_instruction": (
+            "Synthesise all 'snapshot_excerpt' and 'links' fields above into a comprehensive "
+            "answer for the user. Cite specific facts from each source. At the end of your "
+            f"response, list the sites you consulted: {', '.join(site_names)}."
+        ),
+    }, ensure_ascii=False)
 
 
 def browser_snapshot(
@@ -2924,6 +3130,18 @@ registry.register(
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_search"],
     handler=lambda args, **kw: browser_search(query=args.get("query", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔎",
+)
+registry.register(
+    name="browser_multi_search",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_multi_search"],
+    handler=lambda args, **kw: browser_multi_search(
+        query=args.get("query", ""),
+        max_sites=int(args.get("max_sites", 15)),
+        task_id=kw.get("task_id"),
+    ),
     check_fn=check_browser_requirements,
     emoji="🔎",
 )

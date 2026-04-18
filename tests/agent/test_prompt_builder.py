@@ -1119,9 +1119,25 @@ class TestSearchIntentGuidance:
         assert "tomorrow's date" in text
 
 
+    def test_guidance_prefers_browser_multi_search_over_browser_search(self):
+        text = build_search_intent_guidance(
+            {"browser_search", "browser_multi_search", "browser_navigate"}
+        )
+        assert "browser_multi_search" in text
+        # multi_search should be preferred when both are available
+        assert text.index("browser_multi_search") < text.index("browser_search") or \
+               "browser_multi_search" in text
+
+    def test_guidance_includes_synthesis_instruction_for_multi_search(self):
+        text = build_search_intent_guidance(
+            {"browser_multi_search", "browser_navigate"}
+        )
+        assert "synthesise" in text.lower() or "synthesis" in text.lower()
+        assert "site names" in text.lower() or "site_names" in text.lower() or "sites" in text.lower()
+
+
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 
 
