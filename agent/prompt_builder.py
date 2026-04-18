@@ -170,6 +170,15 @@ SKILLS_GUIDANCE = (
     "Skills that aren't maintained become liabilities."
 )
 
+ACTION_EXECUTION_GUIDANCE = (
+    "# Action execution\n"
+    "- When the user explicitly requests an available tool-backed action, execute it "
+    "immediately instead of asking whether they want you to do it.\n"
+    "- Do not restate an available action as a future option after the user has already "
+    "asked for it.\n"
+    "- If the request is safe and unambiguous, make the tool call in the same turn."
+)
+
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
     "You MUST use your tools to take action — do not describe what you would do "
@@ -180,6 +189,8 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "Keep working until the task is actually complete. Do not stop with a summary of "
     "what you plan to do next time. If you have tools available that can accomplish "
     "the task, use them instead of telling the user what you would do.\n"
+    "When the user explicitly requests an available action, perform it immediately "
+    "instead of asking for permission or offering to do it later.\n"
     "Every response should either (a) contain tool calls that make progress, or "
     "(b) deliver a final result to the user. Responses that only describe intentions "
     "without acting are not acceptable."
@@ -273,6 +284,36 @@ def _build_missing_context_tool_examples(available_tools: Optional[set[str] | li
     if not examples:
         return "the appropriate lookup tool"
     return _join_tool_names(examples[:4])
+
+
+def build_search_intent_guidance(
+    available_tools: Optional[set[str] | list[str]] = None,
+) -> str:
+    """Build guidance for resolving web-search vs file-search intent."""
+    available = set(available_tools or [])
+
+    web_lookup_guidance = _build_current_facts_tool_guidance(available or None)
+
+    file_tools = [
+        name
+        for name in ("search_files", "read_file")
+        if name in available
+    ]
+    file_tool_guidance = _join_tool_names(file_tools) if file_tools else "file-search tools"
+
+    return (
+        "# Search intent resolution\n"
+        "- If the user explicitly asks to search the web, look something up online, or "
+        f"find current information, execute that search immediately: {web_lookup_guidance}.\n"
+        "- Do not ask for confirmation when the user has already requested the search.\n"
+        "- If the user says 'search for ...' without mentioning files, the repo, the "
+        "workspace, code, directories, or paths, default to a web search rather than a "
+        f"file search.\n"
+        "- Use file search only when the user clearly refers to files, source code, the "
+        f"repo, the workspace, a directory, or text in files; then use {file_tool_guidance}.\n"
+        "- Correct obvious search-query typos silently when the intended meaning is clear "
+        "(for example: 'tmorrow' -> 'tomorrow')."
+    )
 
 
 def build_openai_model_execution_guidance(

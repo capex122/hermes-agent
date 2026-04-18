@@ -680,6 +680,66 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt()
         assert "NOUS SUBSCRIPTION BLOCK" in prompt
 
+    def test_includes_search_intent_guidance_when_search_tools_loaded(self, agent):
+        prompt = agent._build_system_prompt()
+        assert "# Action execution" in prompt
+        assert "# Search intent resolution" in prompt
+        assert "default to a web search rather than a file search" in prompt
+
+    def test_search_intent_guidance_uses_browser_when_web_search_missing(self):
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("browser_navigate", "browser_snapshot", "browser_vision", "search_files"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "execute that search immediately: use browser_navigate with browser_snapshot or browser_vision." in prompt
+        assert "Use file search only when the user clearly refers to files" in prompt
+
+    @pytest.mark.parametrize(
+        ("model", "base_url"),
+        [
+            ("google/gemini-2.5-pro", "https://generativelanguage.googleapis.com/v1beta/openai/"),
+            ("z-ai/glm-4.5", "https://api.z.ai/api/paas/v4/"),
+            ("anthropic/claude-sonnet-4", "https://openrouter.ai/api/v1"),
+            ("local-model", "http://localhost:11434/v1"),
+        ],
+    )
+    def test_search_and_action_guidance_apply_to_all_model_families(self, model, base_url):
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("web_search", "search_files"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                model=model,
+                api_key="test-k...7890",
+                base_url=base_url,
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "# Action execution" in prompt
+        assert "# Search intent resolution" in prompt
+        assert "execute that search immediately: use web_search." in prompt
+        assert "Do not ask for confirmation when the user has already requested the search." in prompt
+
     def test_skills_prompt_derives_available_toolsets_from_loaded_tools(self):
         tools = _make_tool_defs("web_search", "skills_list", "skill_view", "skill_manage")
         toolset_map = {

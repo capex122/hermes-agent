@@ -20,10 +20,12 @@ from agent.prompt_builder import (
     build_context_files_prompt,
     build_environment_hints,
     CONTEXT_FILE_MAX_CHARS,
+    ACTION_EXECUTION_GUIDANCE,
     DEFAULT_AGENT_IDENTITY,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     OPENAI_MODEL_EXECUTION_GUIDANCE,
+    build_search_intent_guidance,
     build_openai_model_execution_guidance,
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
@@ -39,6 +41,10 @@ from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatu
 
 
 class TestGuidanceConstants:
+    def test_action_execution_guidance_is_string(self):
+        assert isinstance(ACTION_EXECUTION_GUIDANCE, str)
+        assert "execute it immediately" in ACTION_EXECUTION_GUIDANCE.lower()
+
     def test_memory_guidance_discourages_task_logs(self):
         assert "durable facts" in MEMORY_GUIDANCE
         assert "Do NOT save task progress" in MEMORY_GUIDANCE
@@ -1045,6 +1051,20 @@ class TestOpenAIModelExecutionGuidance:
             "with browser_snapshot or browser_vision"
         ) in text
         assert "for example: browser_navigate, browser_snapshot, or browser_vision" in text
+
+
+class TestSearchIntentGuidance:
+    def test_guidance_prefers_web_search_for_plain_search_requests(self):
+        text = build_search_intent_guidance({"web_search", "search_files", "read_file"})
+        assert "default to a web search rather than a file search" in text
+        assert "Do not ask for confirmation" in text
+
+    def test_guidance_handles_browser_only_web_lookup(self):
+        text = build_search_intent_guidance(
+            {"browser_navigate", "browser_snapshot", "browser_vision", "search_files"}
+        )
+        assert "execute that search immediately: use browser_navigate with browser_snapshot or browser_vision." in text
+        assert "'tmorrow' -> 'tomorrow'" in text
 
 
 # =========================================================================

@@ -94,7 +94,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, build_openai_model_execution_guidance
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, ACTION_EXECUTION_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, build_openai_model_execution_guidance, build_search_intent_guidance
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -3477,12 +3477,28 @@ class AIAgent:
 
         # Tool-aware behavioral guidance: only inject when the tools are loaded
         tool_guidance = []
+        if self.valid_tool_names:
+            tool_guidance.append(ACTION_EXECUTION_GUIDANCE)
         if "memory" in self.valid_tool_names:
             tool_guidance.append(MEMORY_GUIDANCE)
         if "session_search" in self.valid_tool_names:
             tool_guidance.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
+        _search_relevant_tools = {
+            "web_search",
+            "web_source_search",
+            "web_deep_search",
+            "web_fetch",
+            "web_extract",
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_vision",
+            "search_files",
+            "read_file",
+        }
+        if self.valid_tool_names & _search_relevant_tools:
+            tool_guidance.append(build_search_intent_guidance(self.valid_tool_names))
         if tool_guidance:
             prompt_parts.append(" ".join(tool_guidance))
 
