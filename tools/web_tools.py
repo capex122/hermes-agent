@@ -126,6 +126,21 @@ def _is_backend_available(backend: str) -> bool:
         return _has_env("TAVILY_API_KEY")
     return False
 
+
+def _get_fallback_backends(primary: str) -> List[str]:
+    """Return ordered list of backends to try when primary fails.
+    
+    Always includes the primary first, then any other available backends.
+    'bundled' is appended last as a guaranteed-available zero-config fallback.
+    """
+    candidates = ["parallel", "exa", "tavily", "firecrawl", "bundled"]
+    # Move primary to the front
+    if primary in candidates:
+        candidates.remove(primary)
+    ordered = [primary] + candidates
+    # Filter to only available backends, preserving order
+    return [b for b in ordered if _is_backend_available(b)]
+
 # ─── Firecrawl Client ────────────────────────────────────────────────────────
 
 _firecrawl_client = None
@@ -1091,83 +1106,66 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        # Dispatch to the configured backend
-        backend = _get_backend()
-        if backend == "bundled":
-            response_data = bundled_web_search(query, limit=limit)
-            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
-            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
-            debug_call_data["final_response_size"] = len(result_json)
-            _debug.log_call("web_search_tool", debug_call_data)
-            _debug.save()
-            return result_json
+        # Build fallback chain — primary backend first, then others
+        primary_backend = _get_backend()
+        backend_chain = _get_fallback_backends(primary_backend)
+        if not backend_chain:
+            backend_chain = [primary_backend]
 
-        if backend == "parallel":
-            response_data = _parallel_search(query, limit)
-            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
-            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
-            debug_call_data["final_response_size"] = len(result_json)
-            _debug.log_call("web_search_tool", debug_call_data)
-            _debug.save()
-            return result_json
+        last_error: Optional[str] = None
+        for attempt_backend in backend_chain:
+            try:
+                if attempt_backend == "bundled":
+                    response_data = bundled_web_search(query, limit=limit)
+                elif attempt_backend == "parallel":
+                    response_data = _parallel_search(query, limit)
+                elif attempt_backend == "exa":
+                    response_data = _exa_search(query, limit)
+                elif attempt_backend == "tavily":
+                    logger.info("Tavily search: '%s' (limit: %d)", query, limit)
+                    raw = _tavily_request("search", {
+                        "query": query,
+                        "max_results": min(limit, 20),
+                        "include_raw_content": False,
+                        "include_images": False,
+                    })
+                    response_data = _normalize_tavily_search_results(raw)
+                else:  # firecrawl (default)
+                    logger.info("Searching the web for: '%s' (limit: %d) via firecrawl", query, limit)
+                    response = _get_firecrawl_client().search(query=query, limit=limit)
+                    web_results = _extract_web_search_results(response)
+                    response_data = {"success": True, "data": {"web": web_results}}
 
-        if backend == "exa":
-            response_data = _exa_search(query, limit)
-            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
-            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
-            debug_call_data["final_response_size"] = len(result_json)
-            _debug.log_call("web_search_tool", debug_call_data)
-            _debug.save()
-            return result_json
+                # Validate non-empty result
+                results_list = response_data.get("data", {}).get("web", [])
+                if not response_data.get("success") or not results_list:
+                    raise RuntimeError(
+                        f"{attempt_backend} returned no results"
+                        + (f": {response_data.get('error')}" if response_data.get("error") else "")
+                    )
 
-        if backend == "tavily":
-            logger.info("Tavily search: '%s' (limit: %d)", query, limit)
-            raw = _tavily_request("search", {
-                "query": query,
-                "max_results": min(limit, 20),
-                "include_raw_content": False,
-                "include_images": False,
-            })
-            response_data = _normalize_tavily_search_results(raw)
-            debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
-            result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
-            debug_call_data["final_response_size"] = len(result_json)
-            _debug.log_call("web_search_tool", debug_call_data)
-            _debug.save()
-            return result_json
+                if attempt_backend != primary_backend:
+                    logger.info("Web search succeeded via fallback backend: %s", attempt_backend)
+                    response_data["fallback_backend_used"] = attempt_backend
 
-        logger.info("Searching the web for: '%s' (limit: %d)", query, limit)
+                debug_call_data["results_count"] = len(results_list)
+                result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+                debug_call_data["final_response_size"] = len(result_json)
+                _debug.log_call("web_search_tool", debug_call_data)
+                _debug.save()
+                return result_json
 
-        response = _get_firecrawl_client().search(
-            query=query,
-            limit=limit
-        )
+            except Exception as backend_err:
+                last_error = f"{attempt_backend}: {str(backend_err)[:200]}"
+                logger.warning("Web search backend '%s' failed: %s", attempt_backend, str(backend_err)[:200])
+                continue
 
-        web_results = _extract_web_search_results(response)
-        results_count = len(web_results)
-        logger.info("Found %d search results", results_count)
-        
-        # Build response with just search metadata (URLs, titles, descriptions)
-        response_data = {
-            "success": True,
-            "data": {
-                "web": web_results
-            }
-        }
-        
-        # Capture debug information
-        debug_call_data["results_count"] = results_count
-        
-        # Convert to JSON
-        result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
-        
-        debug_call_data["final_response_size"] = len(result_json)
-        
-        # Log debug information
+        # All backends exhausted
+        error_msg = f"All web search backends failed. Last error: {last_error or 'unknown'}"
+        debug_call_data["error"] = error_msg
         _debug.log_call("web_search_tool", debug_call_data)
         _debug.save()
-        
-        return result_json
+        return tool_error(error_msg)
         
     except Exception as e:
         error_msg = f"Error searching web: {str(e)}"
@@ -1253,129 +1251,153 @@ async def web_extract_tool(
             else:
                 safe_urls.append(url)
 
-        # Dispatch only safe URLs to the configured backend
+        # Dispatch only safe URLs to the configured backend (with fallback chain)
         if not safe_urls:
             results = []
         else:
-            backend = _get_backend()
+            primary_backend = _get_backend()
+            backend_chain = _get_fallback_backends(primary_backend) or [primary_backend]
 
-            if backend == "bundled":
-                results = await bundled_web_extract(safe_urls)
-            elif backend == "parallel":
-                results = await _parallel_extract(safe_urls)
-            elif backend == "exa":
-                results = _exa_extract(safe_urls)
-            elif backend == "tavily":
-                logger.info("Tavily extract: %d URL(s)", len(safe_urls))
-                raw = _tavily_request("extract", {
-                    "urls": safe_urls,
-                    "include_images": False,
-                })
-                results = _normalize_tavily_documents(raw, fallback_url=safe_urls[0] if safe_urls else "")
-            else:
-                # ── Firecrawl extraction ──
-                # Determine requested formats for Firecrawl v2
-                formats: List[str] = []
-                if format == "markdown":
-                    formats = ["markdown"]
-                elif format == "html":
-                    formats = ["html"]
-                else:
-                    # Default: request markdown for LLM-readiness and include html as backup
-                    formats = ["markdown", "html"]
-
-                # Always use individual scraping for simplicity and reliability
-                # Batch scraping adds complexity without much benefit for small numbers of URLs
-                results: List[Dict[str, Any]] = []
-
-                from tools.interrupt import is_interrupted as _is_interrupted
-                for url in safe_urls:
-                    if _is_interrupted():
-                        results.append({"url": url, "error": "Interrupted", "title": ""})
-                        continue
-
-                    # Website policy check — block before fetching
-                    blocked = check_website_access(url)
-                    if blocked:
-                        logger.info("Blocked web_extract for %s by rule %s", blocked["host"], blocked["rule"])
-                        results.append({
-                            "url": url, "title": "", "content": "",
-                            "error": blocked["message"],
-                            "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
+            results = None
+            last_extract_error: Optional[str] = None
+            for attempt_backend in backend_chain:
+                try:
+                    if attempt_backend == "bundled":
+                        results = await bundled_web_extract(safe_urls)
+                    elif attempt_backend == "parallel":
+                        results = await _parallel_extract(safe_urls)
+                    elif attempt_backend == "exa":
+                        results = _exa_extract(safe_urls)
+                    elif attempt_backend == "tavily":
+                        logger.info("Tavily extract: %d URL(s)", len(safe_urls))
+                        raw = _tavily_request("extract", {
+                            "urls": safe_urls,
+                            "include_images": False,
                         })
-                        continue
+                        results = _normalize_tavily_documents(raw, fallback_url=safe_urls[0] if safe_urls else "")
+                    else:
+                        # ── Firecrawl extraction ──
+                        # Determine requested formats for Firecrawl v2
+                        formats: List[str] = []
+                        if format == "markdown":
+                            formats = ["markdown"]
+                        elif format == "html":
+                            formats = ["html"]
+                        else:
+                            # Default: request markdown for LLM-readiness and include html as backup
+                            formats = ["markdown", "html"]
 
-                    try:
-                        logger.info("Scraping: %s", url)
-                        # Run synchronous Firecrawl scrape in a thread with a
-                        # 60s timeout so a hung fetch doesn't block the session.
-                        try:
-                            scrape_result = await asyncio.wait_for(
-                                asyncio.to_thread(
-                                    _get_firecrawl_client().scrape,
-                                    url=url,
-                                    formats=formats,
-                                ),
-                                timeout=60,
-                            )
-                        except asyncio.TimeoutError:
-                            logger.warning("Firecrawl scrape timed out for %s", url)
-                            results.append({
-                                "url": url, "title": "", "content": "",
-                                "error": "Scrape timed out after 60s — page may be too large or unresponsive. Try browser_navigate instead.",
-                            })
-                            continue
+                        # Always use individual scraping for simplicity and reliability
+                        # Batch scraping adds complexity without much benefit for small numbers of URLs
+                        results = []
 
-                        scrape_payload = _extract_scrape_payload(scrape_result)
-                        metadata = scrape_payload.get("metadata", {})
-                        title = ""
-                        content_markdown = scrape_payload.get("markdown")
-                        content_html = scrape_payload.get("html")
+                        from tools.interrupt import is_interrupted as _is_interrupted
+                        for url in safe_urls:
+                            if _is_interrupted():
+                                results.append({"url": url, "error": "Interrupted", "title": ""})
+                                continue
 
-                        # Ensure metadata is a dict (not an object)
-                        if not isinstance(metadata, dict):
-                            if hasattr(metadata, 'model_dump'):
-                                metadata = metadata.model_dump()
-                            elif hasattr(metadata, '__dict__'):
-                                metadata = metadata.__dict__
-                            else:
-                                metadata = {}
+                            # Website policy check — block before fetching
+                            blocked = check_website_access(url)
+                            if blocked:
+                                logger.info("Blocked web_extract for %s by rule %s", blocked["host"], blocked["rule"])
+                                results.append({
+                                    "url": url, "title": "", "content": "",
+                                    "error": blocked["message"],
+                                    "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
+                                })
+                                continue
 
-                        # Get title from metadata
-                        title = metadata.get("title", "")
+                            try:
+                                logger.info("Scraping: %s", url)
+                                # Run synchronous Firecrawl scrape in a thread with a
+                                # 60s timeout so a hung fetch doesn't block the session.
+                                try:
+                                    scrape_result = await asyncio.wait_for(
+                                        asyncio.to_thread(
+                                            _get_firecrawl_client().scrape,
+                                            url=url,
+                                            formats=formats,
+                                        ),
+                                        timeout=60,
+                                    )
+                                except asyncio.TimeoutError:
+                                    logger.warning("Firecrawl scrape timed out for %s", url)
+                                    results.append({
+                                        "url": url, "title": "", "content": "",
+                                        "error": "Scrape timed out after 60s — page may be too large or unresponsive. Try browser_navigate instead.",
+                                    })
+                                    continue
 
-                        # Re-check final URL after redirect
-                        final_url = metadata.get("sourceURL", url)
-                        final_blocked = check_website_access(final_url)
-                        if final_blocked:
-                            logger.info("Blocked redirected web_extract for %s by rule %s", final_blocked["host"], final_blocked["rule"])
-                            results.append({
-                                "url": final_url, "title": title, "content": "", "raw_content": "",
-                                "error": final_blocked["message"],
-                                "blocked_by_policy": {"host": final_blocked["host"], "rule": final_blocked["rule"], "source": final_blocked["source"]},
-                            })
-                            continue
+                                scrape_payload = _extract_scrape_payload(scrape_result)
+                                metadata = scrape_payload.get("metadata", {})
+                                title = ""
+                                content_markdown = scrape_payload.get("markdown")
+                                content_html = scrape_payload.get("html")
 
-                        # Choose content based on requested format
-                        chosen_content = content_markdown if (format == "markdown" or (format is None and content_markdown)) else content_html or content_markdown or ""
+                                # Ensure metadata is a dict (not an object)
+                                if not isinstance(metadata, dict):
+                                    if hasattr(metadata, 'model_dump'):
+                                        metadata = metadata.model_dump()
+                                    elif hasattr(metadata, '__dict__'):
+                                        metadata = metadata.__dict__
+                                    else:
+                                        metadata = {}
 
-                        results.append({
-                            "url": final_url,
-                            "title": title,
-                            "content": chosen_content,
-                            "raw_content": chosen_content,
-                            "metadata": metadata  # Now guaranteed to be a dict
-                        })
+                                # Get title from metadata
+                                title = metadata.get("title", "")
 
-                    except Exception as scrape_err:
-                        logger.debug("Scrape failed for %s: %s", url, scrape_err)
-                        results.append({
-                            "url": url,
-                            "title": "",
-                            "content": "",
-                            "raw_content": "",
-                            "error": str(scrape_err)
-                        })
+                                # Re-check final URL after redirect
+                                final_url = metadata.get("sourceURL", url)
+                                final_blocked = check_website_access(final_url)
+                                if final_blocked:
+                                    logger.info("Blocked redirected web_extract for %s by rule %s", final_blocked["host"], final_blocked["rule"])
+                                    results.append({
+                                        "url": final_url, "title": title, "content": "", "raw_content": "",
+                                        "error": final_blocked["message"],
+                                        "blocked_by_policy": {"host": final_blocked["host"], "rule": final_blocked["rule"], "source": final_blocked["source"]},
+                                    })
+                                    continue
+
+                                # Choose content based on requested format
+                                chosen_content = content_markdown if (format == "markdown" or (format is None and content_markdown)) else content_html or content_markdown or ""
+
+                                results.append({
+                                    "url": final_url,
+                                    "title": title,
+                                    "content": chosen_content,
+                                    "raw_content": chosen_content,
+                                    "metadata": metadata  # Now guaranteed to be a dict
+                                })
+
+                            except Exception as scrape_err:
+                                logger.debug("Scrape failed for %s: %s", url, scrape_err)
+                                results.append({
+                                    "url": url,
+                                    "title": "",
+                                    "content": "",
+                                    "raw_content": "",
+                                    "error": str(scrape_err)
+                                })
+
+                    # Successful backend completion — break out of fallback loop
+                    if attempt_backend != primary_backend:
+                        logger.info("Web extract succeeded via fallback backend: %s", attempt_backend)
+                    break
+
+                except Exception as backend_err:
+                    last_extract_error = f"{attempt_backend}: {str(backend_err)[:200]}"
+                    logger.warning("Web extract backend '%s' failed: %s", attempt_backend, str(backend_err)[:200])
+                    results = None
+                    continue
+
+            if results is None:
+                # All backends exhausted — surface error per URL so the caller still gets structured output
+                err_msg = f"All web extract backends failed. Last error: {last_extract_error or 'unknown'}"
+                results = [
+                    {"url": u, "title": "", "content": "", "raw_content": "", "error": err_msg}
+                    for u in safe_urls
+                ]
 
         # Merge any SSRF-blocked results back in
         if ssrf_blocked:

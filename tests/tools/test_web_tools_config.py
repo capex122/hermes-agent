@@ -470,10 +470,13 @@ class TestWebSearchErrorHandling:
              patch.object(tools.web_tools._debug, "save"):
             result = json.loads(tools.web_tools.web_search_tool("test query", limit=3))
 
-        assert result == {"error": "Error searching web: boom"}
+        # New behavior: backend failures are surfaced via fallback chain message
+        assert "error" in result
+        assert "boom" in result["error"]
+        assert "firecrawl" in result["error"]
 
         debug_payload = mock_log_call.call_args.args[1]
-        assert debug_payload["error"] == "Error searching web: boom"
+        assert "boom" in debug_payload["error"]
         assert "traceback" not in debug_payload["error"]
         assert "exception_type" not in debug_payload["error"]
         assert "config" not in result
