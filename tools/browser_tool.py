@@ -168,6 +168,24 @@ DEFAULT_COMMAND_TIMEOUT = 30
 # Max tokens for snapshot content before summarization
 SNAPSHOT_SUMMARIZE_THRESHOLD = 8000
 
+_BOT_DETECTION_PATTERNS = (
+    "access denied",
+    "access to this page has been denied",
+    "bot detected",
+    "verification required",
+    "please verify",
+    "are you a robot",
+    "captcha",
+    "cloudflare",
+    "ddos protection",
+    "checking your browser",
+    "just a moment",
+    "attention required",
+    "unusual traffic",
+    "verify you are human",
+    "press and hold",
+)
+
 # Commands that legitimately return empty stdout (e.g. close, record).
 _EMPTY_OK_COMMANDS: frozenset = frozenset({"close", "record"})
 
@@ -657,7 +675,7 @@ atexit.register(_stop_browser_cleanup_thread)
 BROWSER_TOOL_SCHEMAS = [
     {
         "name": "browser_navigate",
-        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
+        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). If you must use browser tools for search because web search tools are unavailable, prefer direct result pages or low-friction engines like DuckDuckGo/Bing instead of Google search pages, which often trigger bot detection. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -1295,6 +1313,15 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
     return '\n'.join(result)
 
 
+def _detect_bot_detection_signal(*parts: str) -> str | None:
+    """Return the first recognizable bot-detection pattern in the provided text."""
+    haystack = "\n".join(part for part in parts if part).lower()
+    for pattern in _BOT_DETECTION_PATTERNS:
+        if pattern in haystack:
+            return pattern
+    return None
+
+
 # ============================================================================
 # Browser Tool Functions
 # ============================================================================
@@ -1386,24 +1413,6 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "title": title
         }
         
-        # Detect common "blocked" page patterns from title/url
-        blocked_patterns = [
-            "access denied", "access to this page has been denied",
-            "blocked", "bot detected", "verification required",
-            "please verify", "are you a robot", "captcha",
-            "cloudflare", "ddos protection", "checking your browser",
-            "just a moment", "attention required"
-        ]
-        title_lower = title.lower()
-        
-        if any(pattern in title_lower for pattern in blocked_patterns):
-            response["bot_detection_warning"] = (
-                f"Page title '{title}' suggests bot detection. The site may have blocked this request. "
-                "Options: 1) Try adding delays between actions, 2) Access different pages first, "
-                "3) Enable advanced stealth (BROWSERBASE_ADVANCED_STEALTH=true, requires Scale plan), "
-                "4) Some sites have very aggressive bot detection that may be unavoidable."
-            )
-        
         # Include feature info on first navigation so model knows what's active
         if is_first_nav and "features" in session_info:
             features = session_info["features"]
@@ -1429,6 +1438,30 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 response["element_count"] = len(refs) if refs else 0
         except Exception as e:
             logger.debug("Auto-snapshot after navigate failed: %s", e)
+
+        matched_pattern = _detect_bot_detection_signal(
+            title,
+            response.get("snapshot", ""),
+            final_url,
+        )
+        if matched_pattern:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        f"Browser navigation hit a bot-detection or access challenge "
+                        f"('{matched_pattern}') at {final_url or url}. Prefer non-browser web "
+                        "search/extract tools, a direct result page, or a deterministic local "
+                        "tool such as terminal/execute_code when possible."
+                    ),
+                    "bot_detection_detected": True,
+                    "challenge_pattern": matched_pattern,
+                    "url": final_url,
+                    "title": title,
+                    **({"snapshot": response["snapshot"]} if response.get("snapshot") else {}),
+                },
+                ensure_ascii=False,
+            )
 
         return json.dumps(response, ensure_ascii=False)
     else:

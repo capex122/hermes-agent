@@ -3486,6 +3486,8 @@ class AIAgent:
         if "skill_manage" in self.valid_tool_names:
             tool_guidance.append(SKILLS_GUIDANCE)
         _search_relevant_tools = {
+            "terminal",
+            "execute_code",
             "web_search",
             "web_source_search",
             "web_deep_search",

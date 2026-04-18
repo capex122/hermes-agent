@@ -218,8 +218,9 @@ def _build_current_facts_tool_guidance(available_tools: Optional[set[str] | list
         return (
             "use an available web-capable tool. Prefer web_search, web_source_search, "
             "or web_deep_search when present; use web_fetch or web_extract for known URLs; "
-            "use browser_navigate with browser_snapshot or browser_vision when search tools "
-            "are unavailable"
+            "use browser_navigate with browser_snapshot or browser_vision on a direct result "
+            "page or DuckDuckGo/Bing when search tools are unavailable; avoid Google result "
+            "pages because they often trigger bot detection"
         )
 
     available = set(available_tools)
@@ -238,6 +239,10 @@ def _build_current_facts_tool_guidance(available_tools: Optional[set[str] | list
         browser_guidance = "use browser_navigate"
         if browser_helpers:
             browser_guidance += f" with {_join_tool_names(browser_helpers)}"
+        browser_guidance += (
+            " on a direct result page or DuckDuckGo/Bing results; avoid Google "
+            "search pages because they often trigger bot detection"
+        )
 
     if search_tools:
         guidance = f"use {_join_tool_names(search_tools)}"
@@ -301,11 +306,26 @@ def build_search_intent_guidance(
     ]
     file_tool_guidance = _join_tool_names(file_tools) if file_tools else "file-search tools"
 
+    deterministic_time_tools = [
+        name
+        for name in ("terminal", "execute_code")
+        if name in available
+    ]
+    deterministic_time_guidance = _join_tool_names(deterministic_time_tools)
+
+    deterministic_time_line = ""
+    if deterministic_time_guidance:
+        deterministic_time_line = (
+            "- For simple deterministic calendar or date/time questions (for example: today\'s date, tomorrow\'s date, day-of-week, or timezone conversions), prefer "
+            f"{deterministic_time_guidance} instead of browser search, even if the user phrases it like a search request.\n"
+        )
+
     return (
         "# Search intent resolution\n"
         "- If the user explicitly asks to search the web, look something up online, or "
         f"find current information, execute that search immediately: {web_lookup_guidance}.\n"
         "- Do not ask for confirmation when the user has already requested the search.\n"
+        f"{deterministic_time_line}"
         "- If the user says 'search for ...' without mentioning files, the repo, the "
         "workspace, code, directories, or paths, default to a web search rather than a "
         f"file search.\n"

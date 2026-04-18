@@ -1041,6 +1041,7 @@ class TestOpenAIModelExecutionGuidance:
         )
         assert "Current facts (weather, news, versions) → use web_source_search" in text
         assert "if search tools are unavailable, use browser_navigate with browser_snapshot" in text
+        assert "avoid Google search pages because they often trigger bot detection" in text
 
     def test_dynamic_guidance_falls_back_to_browser_when_search_unavailable(self):
         text = build_openai_model_execution_guidance(
@@ -1050,6 +1051,7 @@ class TestOpenAIModelExecutionGuidance:
             "Current facts (weather, news, versions) → use browser_navigate "
             "with browser_snapshot or browser_vision"
         ) in text
+        assert "DuckDuckGo/Bing results" in text
         assert "for example: browser_navigate, browser_snapshot, or browser_vision" in text
 
 
@@ -1063,8 +1065,17 @@ class TestSearchIntentGuidance:
         text = build_search_intent_guidance(
             {"browser_navigate", "browser_snapshot", "browser_vision", "search_files"}
         )
-        assert "execute that search immediately: use browser_navigate with browser_snapshot or browser_vision." in text
+        assert "execute that search immediately: use browser_navigate with browser_snapshot or browser_vision" in text
+        assert "avoid Google" in text
+        assert "bot detection" in text
         assert "'tmorrow' -> 'tomorrow'" in text
+
+    def test_guidance_prefers_terminal_for_simple_date_questions(self):
+        text = build_search_intent_guidance(
+            {"terminal", "browser_navigate", "browser_snapshot", "search_files"}
+        )
+        assert "prefer terminal instead of browser search" in text
+        assert "tomorrow's date" in text
 
 
 # =========================================================================

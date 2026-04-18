@@ -269,3 +269,50 @@ class TestCamofoxEvalFix:
         assert "json_data=" not in src, \
             "_camofox_eval should use body= kwarg for _post, not json_data="
         assert "body=" in src
+
+
+# ---------------------------------------------------------------------------
+# Bot-detection handling
+# ---------------------------------------------------------------------------
+
+class TestBotDetectionHandling:
+
+    def test_navigate_returns_structured_failure_on_bot_detection_title(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "_get_session_info", return_value={"_first_nav": False}), \
+             patch.object(
+                 bt,
+                 "_run_browser_command",
+                 side_effect=[
+                     {"success": True, "data": {"title": "Just a moment...", "url": "https://example.com"}},
+                     {"success": True, "data": {"snapshot": "verification page", "refs": {}}},
+                 ],
+             ):
+            result = json.loads(bt.browser_navigate("https://example.com", task_id="test"))
+
+        assert result["success"] is False
+        assert result["bot_detection_detected"] is True
+        assert result["challenge_pattern"] == "just a moment"
+        assert "terminal/execute_code" in result["error"]
+
+    def test_navigate_returns_structured_failure_on_bot_detection_snapshot(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "_get_session_info", return_value={"_first_nav": False}), \
+             patch.object(
+                 bt,
+                 "_run_browser_command",
+                 side_effect=[
+                     {"success": True, "data": {"title": "Search Results", "url": "https://example.com"}},
+                     {"success": True, "data": {"snapshot": "Please verify you are human", "refs": {}}},
+                 ],
+             ):
+            result = json.loads(bt.browser_navigate("https://example.com", task_id="test"))
+
+        assert result["success"] is False
+        assert result["bot_detection_detected"] is True
+        assert result["challenge_pattern"] == "verify you are human"
+        assert result["snapshot"] == "Please verify you are human"
