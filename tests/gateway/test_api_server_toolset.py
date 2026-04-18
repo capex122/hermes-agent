@@ -37,7 +37,7 @@ class TestHermesApiServerToolset:
 
     def test_toolset_includes_browser_tools(self):
         tools = resolve_toolset("hermes-api-server")
-        for tool in ["browser_navigate", "browser_snapshot", "browser_click",
+        for tool in ["browser_navigate", "browser_search", "browser_snapshot", "browser_click",
                       "browser_type", "browser_scroll", "browser_back",
                       "browser_press"]:
             assert tool in tools, f"Missing browser tool: {tool}"

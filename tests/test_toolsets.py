@@ -41,6 +41,11 @@ class TestResolveToolset:
         tools = resolve_toolset("web")
         assert set(tools) == {"web_search", "web_extract"}
 
+    def test_browser_toolset_includes_browser_search(self):
+        tools = resolve_toolset("browser")
+        assert "browser_search" in tools
+        assert "browser_navigate" in tools
+
     def test_webplus_composes_web_and_browser(self):
         tools = resolve_toolset("webplus")
         assert "web_fetch" in tools
@@ -215,6 +220,15 @@ class TestToolsetConsistency:
         # All platform toolsets should be identical
         for ts in tool_sets[1:]:
             assert ts == tool_sets[0]
+
+    def test_hermes_platforms_include_browser_search(self):
+        platforms = ["hermes-cli", "hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant"]
+        for platform in platforms:
+            assert "browser_search" in TOOLSETS[platform]["tools"]
+
+    def test_hermes_acp_includes_browser_search(self):
+        tools = resolve_toolset("hermes-acp")
+        assert "browser_search" in tools
 
 
 class TestPluginToolsets:
