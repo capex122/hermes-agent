@@ -728,7 +728,7 @@ class TestBotDetectionHandling:
         assert result["bot_detection_detected"] is True
 
     def test_browser_search_failure_includes_required_next_action(self):
-        """Failure response must tell the model to use direct navigation instead of stopping."""
+        """Failure response must forbid replaying manual fallback navigation."""
         import json
         import tools.browser_tool as bt
 
@@ -753,9 +753,10 @@ class TestBotDetectionHandling:
         assert result["success"] is False
         assert "required_next_action" in result
         assert "fallback_urls" in result
+        assert result["fallback_urls_already_attempted"] is True
         action = result["required_next_action"]
-        # action must point toward direct navigation, not giving up
-        assert "browser_navigate" in action
+        assert "already attempted" in action
+        assert "Do NOT manually call browser_navigate" in action
         # sports query → saudi-specific fallback urls
         assert any("flashscore" in u or "livescore" in u for u in result["fallback_urls"])
         assert any("saudi" in u for u in result["fallback_urls"])
@@ -786,7 +787,8 @@ class TestBotDetectionHandling:
         assert result["success"] is False
         assert "required_next_action" in result
         assert "fallback_urls" in result
-        assert "browser_navigate" in result["required_next_action"]
+        assert result["fallback_urls_already_attempted"] is True
+        assert "Do NOT manually call browser_navigate" in result["required_next_action"]
 
     def test_build_fallback_urls_returns_sports_urls_for_saudi_query(self):
         """_build_fallback_urls should return Saudi-specific sports URLs for relevant queries."""
@@ -809,13 +811,15 @@ class TestBotDetectionHandling:
         assert any("bbc.com/news" in u or "reuters" in u or "apnews" in u for u in urls)
 
     def test_browser_search_schema_description_mentions_fallback_urls(self):
-        """Schema description must instruct model to use fallback_urls on failure."""
+        """Schema description must explain that fallback_urls are already attempted internally."""
         import tools.browser_tool as bt
 
         schema = bt._BROWSER_SCHEMA_MAP["browser_search"]
         desc = schema["description"]
         assert "fallback_urls" in desc
         assert "CRITICAL" in desc or "REQUIRED" in desc
+        assert "already tried" in desc or "already attempted" in desc
+        assert "Do NOT manually call browser_navigate" in desc or "Do NOT manually" in desc
 
     def test_browser_search_auto_falls_back_to_web_search_when_all_engines_fail(self):
         """When every browser engine fails, transparently fall through to web_search.
@@ -926,7 +930,9 @@ class TestBotDetectionHandling:
                 "error": "Google fail",
             },
         ]
-        assert "web_search" in result["required_next_action"]
+        assert result["fallback_urls_already_attempted"] is True
+        assert "already attempted the direct fallback URLs internally" in result["required_next_action"]
+        assert "Do NOT manually call browser_navigate" in result["required_next_action"]
 
 
 # ---------------------------------------------------------------------------

@@ -1376,10 +1376,11 @@ BROWSER_TOOL_SCHEMAS = [
             "lookup option. Tries DuckDuckGo, Bing, and Yahoo in sequence, returning the result "
             "page with a compact snapshot and interactive ref IDs. Prefer this over manually "
             "navigating to Google or another search-engine homepage.\n"
-            "CRITICAL — when this tool returns success=false: you MUST immediately call "
-            "browser_navigate on one of the URLs listed in the 'fallback_urls' field of the "
-            "response. Do NOT apologise or tell the user you cannot find the information — "
-            "navigate directly to a relevant authoritative site instead."
+            "CRITICAL — when this tool returns success=false: browser_search has already tried "
+            "the full fallback_urls internally. Do NOT manually call browser_navigate on a bare "
+            "hostname or stripped search-engine URL, and do NOT pretend the search succeeded. "
+            "If another non-browser lookup tool is available, use that; otherwise report a "
+            "transient browser-side failure."
         ),
         "parameters": {
             "type": "object",
@@ -2915,11 +2916,14 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
             **({"bot_detection_detected": True} if bot_blocked else {}),
             **({"challenge_pattern": last_result.get("challenge_pattern")} if last_result.get("challenge_pattern") else {}),
             "fallback_urls": fallback_urls,
+            "fallback_urls_already_attempted": True,
             "fallback_attempts": fallback_attempts,
             "required_next_action": (
-                f"REQUIRED: call web_search with the same query, OR call browser_navigate on "
-                f"one of these URLs (each MUST include a path/query, not a bare hostname): "
-                f"{', '.join(fallback_urls[:2])}"
+                "REQUIRED: browser_search already attempted the direct fallback URLs internally. "
+                "Do NOT manually call browser_navigate on stripped hostnames or simplified search "
+                "pages. If another non-browser lookup tool is available, use that with the same "
+                "query; otherwise report a transient browser-side failure instead of claiming no "
+                "results exist."
             ),
         },
         ensure_ascii=False,
