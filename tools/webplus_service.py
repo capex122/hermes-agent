@@ -12,6 +12,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
 
+from tools.webplus_inspect import collect_browser_inspect_data
 from tools.webplus_backend import (
     fetch_youtube_transcript_local,
     local_web_extract,
@@ -25,52 +26,6 @@ _SERVER_START_TIME = time.time()
 _HTTPD: Optional[ThreadingHTTPServer] = None
 
 
-def _json_loads(raw: str) -> Dict[str, Any]:
-    try:
-        parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else {"data": parsed}
-    except Exception:
-        return {"success": False, "error": "Invalid JSON response", "raw": raw}
-
-
-def _selector_expression(selector: str) -> str:
-    selector_json = json.dumps(selector)
-    return (
-        "(() => {"
-        f"const selector = {selector_json};"
-        "const el = document.querySelector(selector);"
-        "if (!el) return {found: false, selector};"
-        "const rect = el.getBoundingClientRect();"
-        "const attrs = {};"
-        "for (const attr of Array.from(el.attributes || [])) attrs[attr.name] = attr.value;"
-        "return {"
-        "found: true, selector, tagName: el.tagName,"
-        "text: ((el.innerText || el.textContent || '').trim()).slice(0, 4000),"
-        "html: (el.outerHTML || '').slice(0, 4000),"
-        "attributes: attrs,"
-        "rect: {x: rect.x, y: rect.y, width: rect.width, height: rect.height}"
-        "};"
-        "})()"
-    )
-
-
-_NETWORK_EXPR = (
-    "(() => {"
-    "const entries = performance.getEntriesByType('resource').slice(-100).map((entry, index) => ({"
-    "index, name: entry.name, initiatorType: entry.initiatorType || '', startTime: entry.startTime, duration: entry.duration,"
-    "transferSize: entry.transferSize ?? null, encodedBodySize: entry.encodedBodySize ?? null, decodedBodySize: entry.decodedBodySize ?? null,"
-    "nextHopProtocol: entry.nextHopProtocol || ''"
-    "}));"
-    "const nav = performance.getEntriesByType('navigation')[0];"
-    "return {"
-    "count: entries.length,"
-    "document: nav ? {type: nav.type, domComplete: nav.domComplete, loadEventEnd: nav.loadEventEnd, transferSize: nav.transferSize ?? null} : null,"
-    "entries"
-    "};"
-    "})()"
-)
-
-
 def _browser_available() -> bool:
     from tools.browser_tool import check_browser_requirements
 
@@ -78,62 +33,10 @@ def _browser_available() -> bool:
 
 
 def _inspect_with_browser(payload: Dict[str, Any]) -> Dict[str, Any]:
-    from tools.browser_tool import browser_console, browser_navigate, browser_snapshot
-
     if not _browser_available():
         return {"success": False, "error": "Browser backend is not available"}
 
-    url = str(payload.get("url") or "").strip()
-    selector = str(payload.get("selector") or "").strip()
-    expression = str(payload.get("expression") or "").strip()
-    include_console = bool(payload.get("include_console", True))
-    include_network = bool(payload.get("include_network", False))
-    clear_console = bool(payload.get("clear_console", False))
-    full_snapshot = bool(payload.get("full_snapshot", False))
-    task_id = payload.get("task_id") or "bundled-web-inspect"
-
-    response: Dict[str, Any] = {
-        "success": True,
-        "mode": "inspect",
-        "development_capabilities": {
-            "console": True,
-            "eval": True,
-            "network": True,
-        },
-    }
-
-    if url:
-        nav = _json_loads(browser_navigate(url, task_id=task_id))
-        if not nav.get("success"):
-            return nav
-        response["url"] = nav.get("url", url)
-        response["title"] = nav.get("title", "")
-
-    snapshot = _json_loads(browser_snapshot(full=full_snapshot, task_id=task_id))
-    if snapshot.get("success"):
-        response["snapshot"] = snapshot.get("snapshot", "")
-        response["element_count"] = snapshot.get("element_count", 0)
-
-    if selector:
-        selector_result = _json_loads(
-            browser_console(expression=_selector_expression(selector), task_id=task_id)
-        )
-        response["selector_result"] = selector_result.get("result", selector_result)
-
-    if expression:
-        eval_result = _json_loads(browser_console(expression=expression, task_id=task_id))
-        response["eval_result"] = eval_result.get("result", eval_result)
-
-    if include_console:
-        console_output = _json_loads(browser_console(clear=clear_console, task_id=task_id))
-        response["console_messages"] = console_output.get("console_messages", [])
-        response["js_errors"] = console_output.get("js_errors", [])
-
-    if include_network:
-        network_output = _json_loads(browser_console(expression=_NETWORK_EXPR, task_id=task_id))
-        response["network"] = network_output.get("result", network_output)
-
-    return response
+    return collect_browser_inspect_data(payload)
 
 
 async def _deep_search(payload: Dict[str, Any]) -> Dict[str, Any]:

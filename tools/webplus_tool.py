@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import quote_plus
 
 from tools.registry import registry, tool_error, tool_result
+from tools.webplus_inspect import collect_browser_inspect_data
 from tools.webplus_backend import (
     _call_bundled_backend,
     bundled_backend_is_available,
@@ -336,9 +337,15 @@ def web_inspect_tool(
     url: str = "",
     *,
     selector: str = "",
+    selectors: Optional[List[str]] = None,
     include_console: bool = True,
     include_network: bool = True,
+    include_images: bool = False,
+    include_storage: bool = False,
+    clear_console: bool = False,
+    full_snapshot: bool = False,
     expression: str = "",
+    expressions: Optional[List[str]] = None,
     task_id: Optional[str] = None,
 ) -> str:
     """Inspect a rendered page using the browser accessibility tree and DOM eval."""
@@ -350,10 +357,15 @@ def web_inspect_tool(
             {
                 "url": url,
                 "selector": selector,
+                "selectors": selectors or [],
                 "include_console": include_console,
                 "include_network": include_network,
+                "include_images": include_images,
+                "include_storage": include_storage,
                 "expression": expression,
-                "clear_console": False,
+                "expressions": expressions or [],
+                "clear_console": clear_console,
+                "full_snapshot": full_snapshot,
                 "task_id": task_id or "",
             },
         )
@@ -363,73 +375,24 @@ def web_inspect_tool(
     if not _browser_available():
         return tool_error("Browser backend is required for web inspection", success=False)
 
-    effective_url = url.strip()
-    effective_selector = selector.strip() or None
-    if effective_url:
-        result = _browser_fetch(
-            effective_url,
-            selector=effective_selector,
-            include_console=include_console,
-            task_id=task_id,
+    return tool_result(
+        collect_browser_inspect_data(
+            {
+                "url": url,
+                "selector": selector,
+                "selectors": selectors or [],
+                "include_console": include_console,
+                "include_network": include_network,
+                "include_images": include_images,
+                "include_storage": include_storage,
+                "clear_console": clear_console,
+                "full_snapshot": full_snapshot,
+                "expression": expression,
+                "expressions": expressions or [],
+                "task_id": task_id or "",
+            }
         )
-        parsed = _json_load(result)
-        parsed["mode"] = "inspect"
-        return json.dumps(parsed, ensure_ascii=False)
-
-    from tools.browser_tool import browser_console, browser_snapshot
-
-    snapshot = _json_load(browser_snapshot(full=False, task_id=task_id))
-    if not snapshot.get("success"):
-        return json.dumps(snapshot, ensure_ascii=False)
-
-    response: Dict[str, Any] = {
-        "success": True,
-        "mode": "inspect",
-        "snapshot": snapshot.get("snapshot", ""),
-        "element_count": snapshot.get("element_count", 0),
-        "development_capabilities": {
-            "console": True,
-            "eval": True,
-            "network": include_network,
-            "raw_js_eval_tool": "browser_console",
-        },
-    }
-    if effective_selector:
-        selector_result = _json_load(
-            browser_console(expression=_selector_eval_expression(effective_selector), task_id=task_id)
-        )
-        response["selector_result"] = selector_result.get("result", selector_result)
-    if expression:
-        eval_result = _json_load(browser_console(expression=expression, task_id=task_id))
-        response["eval_result"] = eval_result.get("result", eval_result)
-    if include_console:
-        console_output = _json_load(browser_console(task_id=task_id))
-        response["console_messages"] = console_output.get("console_messages", [])
-        response["js_errors"] = console_output.get("js_errors", [])
-    if include_network:
-        network_output = _json_load(
-            browser_console(
-                expression=(
-                    "(() => {"
-                    "const entries = performance.getEntriesByType('resource').slice(-100).map((entry, index) => ({"
-                    "index, name: entry.name, initiatorType: entry.initiatorType || '', startTime: entry.startTime, duration: entry.duration,"
-                    "transferSize: entry.transferSize ?? null, encodedBodySize: entry.encodedBodySize ?? null, decodedBodySize: entry.decodedBodySize ?? null,"
-                    "nextHopProtocol: entry.nextHopProtocol || ''"
-                    "}));"
-                    "const nav = performance.getEntriesByType('navigation')[0];"
-                    "return {"
-                    "count: entries.length,"
-                    "document: nav ? {type: nav.type, domComplete: nav.domComplete, loadEventEnd: nav.loadEventEnd, transferSize: nav.transferSize ?? null} : null,"
-                    "entries"
-                    "};"
-                    "})()"
-                ),
-                task_id=task_id,
-            )
-        )
-        response["network"] = network_output.get("result", network_output)
-
-    return tool_result(response)
+    )
 
 
 WEB_FETCH_SCHEMA = {
@@ -491,15 +454,21 @@ YOUTUBE_TRANSCRIPT_SCHEMA = {
 
 WEB_INSPECT_SCHEMA = {
     "name": "web_inspect",
-    "description": "Inspect a rendered web page using a higher-level development diagnostics workflow. Returns snapshot data, optional selector lookup, console messages, JS errors, optional resource-timing network summary, and optional evaluated expression output. Use browser_console for raw ad hoc JavaScript evaluation.",
+    "description": "Inspect a rendered web page using a higher-level development diagnostics workflow. Returns snapshot data, page metadata, multi-selector inspection, multi-expression evaluation, console messages, JS errors, summarized network activity, and optional storage/image capture. Use browser_console for raw ad hoc JavaScript evaluation.",
     "parameters": {
         "type": "object",
         "properties": {
             "url": {"type": "string", "description": "Optional URL to open before inspection. Leave empty to inspect the current browser page."},
             "selector": {"type": "string", "description": "Optional CSS selector to inspect in the current page"},
+            "selectors": {"type": "array", "items": {"type": "string"}, "description": "Optional list of CSS selectors to inspect in one pass"},
             "include_console": {"type": "boolean", "description": "Include console messages and JS errors", "default": True},
             "include_network": {"type": "boolean", "description": "Include a best-effort network summary from the browser Performance API", "default": True},
+            "include_images": {"type": "boolean", "description": "Include discovered page images with URL and alt text", "default": False},
+            "include_storage": {"type": "boolean", "description": "Include cookies/localStorage/sessionStorage summaries", "default": False},
+            "clear_console": {"type": "boolean", "description": "Clear the console buffer after reading messages", "default": False},
+            "full_snapshot": {"type": "boolean", "description": "Request the full accessibility snapshot instead of the compact snapshot", "default": False},
             "expression": {"type": "string", "description": "Optional JavaScript expression to evaluate and include in the inspect response. For general raw JS usage, prefer browser_console."},
+            "expressions": {"type": "array", "items": {"type": "string"}, "description": "Optional list of JavaScript expressions to evaluate and include in the inspect response."},
         },
         "required": [],
     },
@@ -570,9 +539,15 @@ registry.register(
     handler=lambda args, **kw: web_inspect_tool(
         url=args.get("url", ""),
         selector=args.get("selector", ""),
+        selectors=args.get("selectors") if isinstance(args.get("selectors"), list) else None,
         include_console=bool(args.get("include_console", True)),
         include_network=bool(args.get("include_network", True)),
+        include_images=bool(args.get("include_images", False)),
+        include_storage=bool(args.get("include_storage", False)),
+        clear_console=bool(args.get("clear_console", False)),
+        full_snapshot=bool(args.get("full_snapshot", False)),
         expression=args.get("expression", ""),
+        expressions=args.get("expressions") if isinstance(args.get("expressions"), list) else None,
         task_id=kw.get("task_id"),
     ),
     check_fn=check_web_inspect_requirements,
