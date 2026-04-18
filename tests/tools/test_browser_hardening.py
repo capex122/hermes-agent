@@ -862,6 +862,50 @@ class TestBotDetectionHandling:
         assert result["results_count"] == 1
         assert result["source_results"][0]["url"] == "https://example.com/fire-pdf"
 
+    def test_browser_search_falls_back_to_web_source_search_when_web_search_unavailable(self):
+        """When legacy web_search is unavailable, use local source-search before failing."""
+        import json
+        import tools.browser_tool as bt
+
+        fake_source_results = json.dumps({
+            "success": True,
+            "data": {
+                "web": [
+                    {
+                        "title": "Introducing Fire-PDF",
+                        "url": "https://www.firecrawl.dev/blog/fire-pdf-launch",
+                        "description": "Rust-based PDF parsing engine.",
+                    },
+                ]
+            },
+            "mode": "source-search",
+        })
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "DDG blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Bing blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Yahoo blocked", "bot_detection_detected": True}),
+            ],
+        ), patch(
+            "tools.web_tools.web_search_tool",
+            return_value=json.dumps({"error": "All web search backends failed. Last error: no backend configured"}),
+        ), patch(
+            "tools.webplus_tool.web_source_search_tool",
+            return_value=fake_source_results,
+        ):
+            result = json.loads(bt.browser_search("fire pdf", task_id="test"))
+
+        assert result["success"] is True
+        assert result["fallback_used"] is True
+        assert result["search_engine"] == "web_source_search_fallback"
+        assert result["browser_attempted_engines"] == ["duckduckgo", "bing", "yahoo"]
+        assert result["browser_bot_detection_detected"] is True
+        assert result["results_count"] == 1
+        assert result["source_results"][0]["url"] == "https://www.firecrawl.dev/blog/fire-pdf-launch"
+
     def test_browser_search_directly_opens_fallback_url_when_web_search_also_fails(self):
         """If web_search is unavailable, browser_search should try direct fallback URLs itself."""
         import json

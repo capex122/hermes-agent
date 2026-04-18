@@ -2843,6 +2843,43 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
     bot_blocked = any(attempt.get("bot_detection_detected") for attempt in attempts)
     fallback_urls = _build_fallback_urls(normalized_query)
 
+    def _build_non_browser_fallback_success(
+        *,
+        search_engine: str,
+        results: list[dict[str, Any]],
+    ) -> str:
+        return json.dumps(
+            {
+                "success": True,
+                "search_query": normalized_query,
+                "search_engine": search_engine,
+                "fallback_used": True,
+                "browser_attempted_engines": [attempt["engine"] for attempt in attempts],
+                "browser_failure_reason": last_result.get("error") or "all browser engines failed",
+                **(
+                    {"browser_bot_detection_detected": True}
+                    if bot_blocked
+                    else {}
+                ),
+                "source_results": [
+                    {
+                        "title": (r.get("title") or "").strip(),
+                        "url": (r.get("url") or "").strip(),
+                        "description": (r.get("description") or r.get("snippet") or "").strip(),
+                    }
+                    for r in results
+                    if (r.get("url") or "").strip()
+                ],
+                "results_count": len([r for r in results if (r.get("url") or "").strip()]),
+                "next_step_hint": (
+                    "Browser search engines were unreachable; results came from a non-browser "
+                    "search fallback. Use the URLs in source_results with browser_navigate or "
+                    "web_fetch/web_extract when available."
+                ),
+            },
+            ensure_ascii=False,
+        )
+
     # ── Auto-fallback to web_search ────────────────────────────────────────
     # If every browser engine failed (network, bot detection, or empty results)
     # transparently fall through to the configured web search backend(s).
@@ -2856,40 +2893,34 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
         web_payload = json.loads(web_raw)
         web_results = (web_payload.get("data") or {}).get("web") or []
         if web_payload.get("success") and web_results:
-            return json.dumps(
-                {
-                    "success": True,
-                    "search_query": normalized_query,
-                    "search_engine": "web_search_fallback",
-                    "fallback_used": True,
-                    "browser_attempted_engines": [attempt["engine"] for attempt in attempts],
-                    "browser_failure_reason": last_result.get("error") or "all browser engines failed",
-                    **(
-                        {"browser_bot_detection_detected": True}
-                        if bot_blocked
-                        else {}
-                    ),
-                    "source_results": [
-                        {
-                            "title": (r.get("title") or "").strip(),
-                            "url": (r.get("url") or "").strip(),
-                            "description": (r.get("description") or r.get("snippet") or "").strip(),
-                        }
-                        for r in web_results
-                        if (r.get("url") or "").strip()
-                    ],
-                    "results_count": len(web_results),
-                    "next_step_hint": (
-                        "Browser search engines were unreachable; results came from the web_search "
-                        "API backend. Use the URLs in source_results with browser_navigate or "
-                        "web_extract to read individual pages."
-                    ),
-                },
-                ensure_ascii=False,
+            return _build_non_browser_fallback_success(
+                search_engine="web_search_fallback",
+                results=web_results,
             )
     except Exception as fallback_err:  # noqa: BLE001
         logger.warning(
             "browser_search → web_search fallback failed: %s", str(fallback_err)[:200]
+        )
+
+    # ── Auto-fallback to local source search ───────────────────────────────
+    # Some installs intentionally do not expose the legacy web_search tool,
+    # but do have the bundled/local source-search workflow available. Use it
+    # before giving up so browser_search can still produce results in a fully
+    # local/no-cloud setup.
+    try:
+        from tools.webplus_tool import web_source_search_tool
+
+        source_raw = web_source_search_tool(normalized_query, limit=10)
+        source_payload = json.loads(source_raw)
+        source_results = (source_payload.get("data") or {}).get("web") or []
+        if source_payload.get("success") and source_results:
+            return _build_non_browser_fallback_success(
+                search_engine="web_source_search_fallback",
+                results=source_results,
+            )
+    except Exception as fallback_err:  # noqa: BLE001
+        logger.warning(
+            "browser_search → web_source_search fallback failed: %s", str(fallback_err)[:200]
         )
 
     direct_fallback_result, fallback_attempts = _attempt_browser_search_fallback_navigation(
