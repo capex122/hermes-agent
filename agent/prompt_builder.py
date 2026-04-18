@@ -826,6 +826,88 @@ CAMOFOX_CONTROL_GUIDANCE = (
 )
 
 
+TERMINAL_INSTALL_RECOVERY_GUIDANCE = (
+    "# Installing software via terminal (DO NOT GIVE UP ON THE FIRST FAILURE)\n"
+    "You have full terminal access via the `terminal` tool -- there is no "
+    "Hermes-side sandbox or allow-list. When an install fails, the cause is "
+    "almost always one of: missing sudo, PEP-668-protected Python, missing "
+    "package manager, or an interactive prompt you did not see. Work through "
+    "this recovery ladder BEFORE telling the user 'I cannot install'.\n"
+    "\n"
+    "## Non-interactive is already on\n"
+    "Hermes injects `DEBIAN_FRONTEND=noninteractive`, `NEEDRESTART_MODE=a`, "
+    "`APT_LISTCHANGES_FRONTEND=none`, `PIP_YES=1`, `npm_config_yes=true`, and "
+    "`CI=1` into every terminal call. You do NOT need to set these yourself. "
+    "If a command STILL hangs, pass explicit flags: `apt-get -y`, "
+    "`pip install --yes`, `npm install --yes`, `dnf -y`, `pacman --noconfirm`, "
+    "`brew install --force`, etc. Also pipe `yes |` into truly stubborn "
+    "scripts as a last resort.\n"
+    "\n"
+    "## Sudo / elevated commands\n"
+    "- If the user configured `SUDO_PASSWORD` in `$HERMES_HOME/.env`, Hermes "
+    "auto-transforms bare `sudo <cmd>` into `sudo -S -p '' <cmd>` and pipes "
+    "the password in. Just write `sudo apt-get install -y foo` -- it Just "
+    "Works.\n"
+    "- In the CLI without `SUDO_PASSWORD`, Hermes prompts the user for it "
+    "(45s timeout) the first time, then caches for the session.\n"
+    "- In gateway / non-interactive mode without `SUDO_PASSWORD`, sudo fails "
+    "gracefully with 'password required'. Tell the user to add "
+    "`SUDO_PASSWORD=...` to `$HERMES_HOME/.env` -- do NOT claim sudo is "
+    "blocked by Hermes.\n"
+    "- If the box is passwordless-sudo configured (common on VPS), `sudo -n "
+    "apt-get install -y foo` works with no password at all.\n"
+    "\n"
+    "## Python package install recovery ladder\n"
+    "When `pip install X` fails, try IN ORDER (each is a separate terminal "
+    "call):\n"
+    "1. `python3 -m pip install --user X` -- installs to `~/.local/`, no "
+    "sudo, no venv needed.\n"
+    "2. `python3 -m pip install --break-system-packages X` -- bypasses "
+    "PEP-668 'externally-managed-environment' protection on Debian/Ubuntu "
+    "24.04+.\n"
+    "3. `python3 -m pip install --user --break-system-packages X` -- combine "
+    "both.\n"
+    "4. `pipx install X` (if pipx available) -- best for CLI tools.\n"
+    "5. `uv pip install --system X` or `uv tool install X` (if uv is "
+    "available -- Hermes ships with it).\n"
+    "6. Create a local venv: `python3 -m venv /tmp/v && /tmp/v/bin/pip "
+    "install X` then run `/tmp/v/bin/<tool>`.\n"
+    "7. If the module is truly unavailable, `python3 -m ensurepip --upgrade "
+    "--user` to bootstrap pip itself, then retry step 1.\n"
+    "\n"
+    "## System package install recovery\n"
+    "- `apt-get update` fails with 'permission denied' / 'lock file' -> "
+    "you are not root and there is no passwordless sudo. Switch to the "
+    "user-space Python ladder above, or use `conda`, `micromamba`, a pre-built "
+    "binary download, or a Docker container if `docker` is available.\n"
+    "- `apt` is not the only option: also check `dnf`, `yum`, `pacman`, "
+    "`zypper`, `apk`, `brew`, `pkg` (Termux/FreeBSD).\n"
+    "- On stripped VPS images, grab binaries directly: "
+    "`curl -fsSL <url> -o ~/.local/bin/tool && chmod +x ~/.local/bin/tool` "
+    "and make sure `~/.local/bin` is on PATH.\n"
+    "\n"
+    "## Parallelism & background work\n"
+    "You can launch MANY terminals at once. Pass `background=true` to start "
+    "long-running work (builds, servers, downloads) and keep issuing more "
+    "`terminal` calls while they run. Use `process(action='poll')` to check "
+    "progress or `process(action='wait')` to block. This is ideal for "
+    "installing Camofox/Playwright/npm deps in parallel.\n"
+    "\n"
+    "## Interactive TUI programs (nano, vim, codex CLI, claude code, python "
+    "REPL)\n"
+    "Pass `pty=true` to `terminal`. Without a PTY they hang forever because "
+    "they try to detect a terminal and block on stdin.\n"
+    "\n"
+    "## Anti-patterns\n"
+    "- DO NOT report 'I cannot install X because I lack permissions' after "
+    "only ONE `pip install X` or ONE `apt install X`. Work the ladder.\n"
+    "- DO NOT ask the user to run the install manually if any of steps 1-7 "
+    "above would succeed.\n"
+    "- DO NOT claim 'a security layer is blocking me' -- Hermes has no "
+    "terminal sandbox. If a command fails, it's the OS, not Hermes."
+)
+
+
 def build_advanced_capabilities_guidance(
     available_tools: Optional[set[str] | list[str]] = None,
 ) -> str:
@@ -889,6 +971,10 @@ def build_advanced_capabilities_guidance(
     # ── Camofox local browser server lifecycle ───────────────────────────
     if "camofox_control" in available:
         sections.append(CAMOFOX_CONTROL_GUIDANCE)
+
+    # ── Terminal install recovery ladder ─────────────────────────────────
+    if "terminal" in available:
+        sections.append(TERMINAL_INSTALL_RECOVERY_GUIDANCE)
 
     # ── Code execution sandbox ───────────────────────────────────────────
     if "execute_code" in available:

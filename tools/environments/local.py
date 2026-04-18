@@ -210,6 +210,25 @@ def _make_run_env(env: dict) -> dict:
     if _profile_home:
         run_env["HOME"] = _profile_home
 
+    # Non-interactive defaults so common package-manager / installer prompts
+    # never hang the agent. Users who explicitly set any of these in their
+    # environment keep their value; we only fill in the blanks.
+    _noninteractive_defaults = {
+        "DEBIAN_FRONTEND": "noninteractive",
+        "NEEDRESTART_MODE": "a",            # auto-restart services silently
+        "NEEDRESTART_SUSPEND": "1",         # suppress needrestart prompt entirely
+        "APT_LISTCHANGES_FRONTEND": "none", # skip "press Enter to continue"
+        "UCF_FORCE_CONFFNEW": "1",          # take new config on conffile conflicts
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_YES": "1",
+        "PIP_ROOT_USER_ACTION": "ignore",
+        "PYTHONUNBUFFERED": "1",
+        "CI": "1",                          # many tools use this to skip prompts
+        "npm_config_yes": "true",           # npx/npm auto-accept
+    }
+    for k, v in _noninteractive_defaults.items():
+        run_env.setdefault(k, v)
+
     return run_env
 
 
