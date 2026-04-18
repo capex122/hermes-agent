@@ -156,6 +156,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("update", "Update Hermes Agent to the latest version", "Info",
                gateway_only=True),
     CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info"),
+    CommandDef("unlimited", "Toggle unlimited iteration mode (owner override - off|on|status)", "Configuration",
+               args_hint="[on|off|status]"),
 
     # Exit
     CommandDef("quit", "Exit the CLI", "Exit",

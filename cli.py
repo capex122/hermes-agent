@@ -5544,6 +5544,8 @@ class HermesCLI:
             self._show_insights(cmd_original)
         elif canonical == "debug":
             self._handle_debug_command()
+        elif canonical == "unlimited":
+            self._handle_unlimited_command(cmd_original)
         elif canonical == "paste":
             self._handle_paste_command()
         elif canonical == "image":
@@ -6462,6 +6464,44 @@ class HermesCLI:
 
         args = SimpleNamespace(lines=200, expire=7, local=False)
         run_debug_share(args)
+
+    def _handle_unlimited_command(self, cmd_original: str):
+        """Handle /unlimited [on|off|status] — toggle iteration budget override.
+
+        Owner-authorized escape hatch. When on, the agent's iteration budget
+        will not block, allowing it to keep working on long tasks. Use with
+        care — a looping model can burn API budget rapidly.
+        """
+        if not self.agent or not getattr(self.agent, "iteration_budget", None):
+            print("  No active agent.")
+            return
+
+        parts = cmd_original.strip().split(maxsplit=1)
+        arg = (parts[1].strip().lower() if len(parts) > 1 else "").strip()
+
+        budget = self.agent.iteration_budget
+        if arg in ("", "status"):
+            state = "ON" if budget.unlimited else "OFF"
+            cap = "∞" if budget.unlimited else str(budget.max_total)
+            print(f"  Unlimited iterations: {state}  (used: {budget.used}, cap: {cap})")
+            if not budget.unlimited:
+                print("  Use /unlimited on to allow the agent to bypass the iteration cap.")
+                print("  Or set HERMES_UNLIMITED_ITERATIONS=1 in ~/.hermes/.env to make it default.")
+            return
+
+        if arg in ("on", "true", "yes", "enable", "1"):
+            budget.set_unlimited(True)
+            print("  ⚠️  Unlimited iteration mode: ON")
+            print("     The agent will keep iterating until it produces a final response.")
+            print("     This can burn API budget if the model loops. Use /unlimited off to disable.")
+            return
+
+        if arg in ("off", "false", "no", "disable", "0"):
+            budget.set_unlimited(False)
+            print(f"  ✅ Unlimited iteration mode: OFF (cap: {budget.max_total})")
+            return
+
+        print(f"  Unknown argument: {arg!r}. Use: /unlimited [on|off|status]")
 
     def _show_usage(self):
         """Show rate limits (if available) and session token usage."""

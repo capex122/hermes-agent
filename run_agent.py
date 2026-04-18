@@ -180,16 +180,26 @@ class IterationBudget:
 
     ``execute_code`` (programmatic tool calling) iterations are refunded via
     :meth:`refund` so they don't eat into the budget.
+
+    **Unlimited mode**: When the env var ``HERMES_UNLIMITED_ITERATIONS=1`` is
+    set, or when constructed with ``unlimited=True``, the budget never blocks.
+    This is an explicit owner-authorized override — use with care, it can
+    burn API budget if the model loops.
     """
 
-    def __init__(self, max_total: int):
+    def __init__(self, max_total: int, unlimited: bool = False):
         self.max_total = max_total
         self._used = 0
         self._lock = threading.Lock()
+        # Owner-authorized override: env var OR explicit flag
+        self._unlimited = unlimited or os.environ.get("HERMES_UNLIMITED_ITERATIONS", "").strip().lower() in ("1", "true", "yes", "on")
 
     def consume(self) -> bool:
         """Try to consume one iteration.  Returns True if allowed."""
         with self._lock:
+            if self._unlimited:
+                self._used += 1
+                return True
             if self._used >= self.max_total:
                 return False
             self._used += 1
@@ -201,6 +211,15 @@ class IterationBudget:
             if self._used > 0:
                 self._used -= 1
 
+    def set_unlimited(self, value: bool) -> None:
+        """Toggle unlimited mode at runtime (used by /unlimited command)."""
+        with self._lock:
+            self._unlimited = bool(value)
+
+    @property
+    def unlimited(self) -> bool:
+        return self._unlimited
+
     @property
     def used(self) -> int:
         return self._used
@@ -208,7 +227,10 @@ class IterationBudget:
     @property
     def remaining(self) -> int:
         with self._lock:
+            if self._unlimited:
+                return 10**9  # effectively unlimited
             return max(0, self.max_total - self._used)
+
 
 
 # Tools that must never run concurrently (interactive / user-facing).
@@ -8717,7 +8739,11 @@ class AIAgent:
             except Exception:
                 pass
 
-        while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
+        while (
+            self.iteration_budget.unlimited
+            or (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0)
+            or self._budget_grace_call
+        ):
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
 
@@ -11335,7 +11361,7 @@ class AIAgent:
                     messages.append({"role": "assistant", "content": final_response})
                     break
         
-        if final_response is None and (
+        if final_response is None and not self.iteration_budget.unlimited and (
             api_call_count >= self.max_iterations
             or self.iteration_budget.remaining <= 0
         ):
