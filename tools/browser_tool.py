@@ -2100,11 +2100,55 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 
 
 def _detect_bot_detection_signal(*parts: str) -> str | None:
-    """Return the first recognizable bot-detection pattern in the provided text."""
+    """Return the first recognizable bot-detection pattern in the provided text.
+    
+    Smart detection: avoids false positives on legitimate test/info pages that
+    describe bot detection (e.g. pixelscan.net/bot-check, browserscan.net/bot-detection).
+    These pages contain words like 'captcha' or 'cloudflare' as content, not as a block.
+    """
     haystack = "\n".join(part for part in parts if part).lower()
     matches = [pattern for pattern in _BOT_DETECTION_PATTERNS if pattern in haystack]
     if not matches:
         return None
+    
+    # Extract URL and title separately for context-aware filtering
+    title = (parts[0] or "").lower() if len(parts) > 0 else ""
+    url = ""
+    for part in parts:
+        if part and part.startswith("http"):
+            url = part.lower()
+            break
+    
+    # Whitelist: URLs that are explicitly bot-detection TEST pages
+    # These pages legitimately contain bot-detection vocabulary as their content
+    test_page_url_markers = (
+        "/bot-check", "/bot-detection", "/bot-management", "/bot-test",
+        "/antibot", "/anti-bot", "/headless", "/webdriver",
+        "/playground", "/fingerprint", "/detection-check", "/bot.html",
+        "bot.incolumitas.com", "bot.sannysoft.com", "browserscan.net",
+        "pixelscan.net", "ipqualityscore.com", "demo.fingerprint.com",
+        "botguard.net",
+    )
+    is_test_page = any(marker in url for marker in test_page_url_markers)
+    
+    # Real block titles (high confidence indicators)
+    real_block_titles = (
+        "just a moment", "attention required", "access denied",
+        "verify you are human", "checking your browser",
+        "human verification", "security check required",
+        "ddos-guard", "please wait", "cloudflare",
+        "you have been blocked", "robot or human",
+    )
+    title_indicates_block = any(pattern in title for pattern in real_block_titles)
+    
+    # If title clearly indicates a block, trust it regardless of test page status
+    if title_indicates_block:
+        return max(matches, key=len)
+    
+    # If it's a known test page and the title doesn't show a block, ignore content-based matches
+    if is_test_page:
+        return None
+    
     return max(matches, key=len)
 
 
