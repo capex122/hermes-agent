@@ -60,6 +60,8 @@ _HERMES_CORE_TOOLS = [
     "mcp_create_server",
     # In-process HTTP/HTTPS proxy switching (pairs with mubeng for IP rotation)
     "proxy_control",
+    # Camofox local anti-detection browser server lifecycle
+    "camofox_control",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -119,7 +121,7 @@ TOOLSETS = {
             "browser_navigate", "browser_search", "browser_multi_search", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
-            "browser_vision", "browser_console", "web_search", "proxy_control"
+            "browser_vision", "browser_console", "web_search", "proxy_control", "camofox_control"
         ],
         "includes": []
     },
@@ -149,6 +151,12 @@ TOOLSETS = {
     "proxy": {
         "description": "Switch the in-process HTTP/HTTPS proxy at runtime (pair with mubeng for IP rotation when search engines block you)",
         "tools": ["proxy_control"],
+        "includes": []
+    },
+
+    "camofox": {
+        "description": "Install / start / stop / inspect the local Camofox anti-detection browser server used by the browser_* tools",
+        "tools": ["camofox_control"],
         "includes": []
     },
     

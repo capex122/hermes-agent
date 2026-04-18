@@ -1304,6 +1304,25 @@ install_node_deps() {
         log_success "Browser engine setup complete"
     fi
 
+    # Install Camofox local anti-detection browser server (npm package).
+    # This is the canonical local backend for browser_navigate / browser_search
+    # / browser_click etc. — when CAMOFOX_URL is set, every browser_* tool
+    # routes through it for fingerprint-spoofed Firefox automation under the
+    # user's own control.
+    if [ "$DISTRO" != "termux" ] && [ -d "$INSTALL_DIR" ]; then
+        log_info "Installing Camofox anti-detection browser server..."
+        cd "$INSTALL_DIR"
+        npm install --silent --no-audit --no-fund @askjo/camofox-browser 2>/dev/null || {
+            log_warn "Camofox install failed — you can retry inside Hermes via:"
+            log_warn "  camofox_control(action='install')"
+        }
+        if [ -d "$INSTALL_DIR/node_modules/@askjo/camofox-browser" ]; then
+            log_success "Camofox installed"
+            log_info "  Start it inside Hermes with: camofox_control(action='start')"
+            log_info "  First start downloads the Camoufox engine (~300MB) — be patient."
+        fi
+    fi
+
     # Install WhatsApp bridge dependencies
     if [ -f "$INSTALL_DIR/scripts/whatsapp-bridge/package.json" ]; then
         log_info "Installing WhatsApp bridge dependencies..."

@@ -772,6 +772,60 @@ MUBENG_PROXY_ROTATION_GUIDANCE = (
 )
 
 
+CAMOFOX_CONTROL_GUIDANCE = (
+    "# Camofox local browser server (FIX BROWSER FAILURES YOURSELF)\n"
+    "Camofox is the local anti-detection browser server that powers all "
+    "`browser_*` tools when CAMOFOX_URL is configured. It's a Camoufox-based "
+    "(Firefox + C++ fingerprint spoofing) Node.js daemon, fully self-hosted. "
+    "When the user reports 'browser hangs', 'navigation failed', "
+    "'Camofox unreachable', or you see ECONNREFUSED on browser_navigate -- "
+    "this is the tool to fix it. Do not say 'I cannot' -- just run "
+    "`camofox_control` and recover.\n"
+    "\n"
+    "## Diagnostic-first workflow\n"
+    "1. `camofox_control(action='status')` -- always start here. Shows whether "
+    "the server is installed, whether it's running, what URL it's at, and "
+    "what /health returns. The `hint` field tells you the next step.\n"
+    "2. If `installed=false`: `camofox_control(action='install')`. This runs "
+    "`npm install @askjo/camofox-browser` in the Hermes project root. First "
+    "install pulls the package; first run downloads the Camoufox engine "
+    "(~300MB) -- the start step waits up to 60s for /health.\n"
+    "3. If `installed=true` but `running=false`: `camofox_control(action='start')`. "
+    "Launches as a detached background process, persists `CAMOFOX_URL` to "
+    "`$HERMES_HOME/.env` AND sets it in the live process so subsequent "
+    "browser_* calls in this same session route through Camofox immediately.\n"
+    "4. If running but browser tools still fail: `camofox_control(action='restart')` "
+    "to recycle the daemon, then `camofox_control(action='logs', lines=200)` to "
+    "inspect what crashed.\n"
+    "5. If the user already has Camofox running on another machine / port / "
+    "Docker: `camofox_control(action='set_url', url='http://...')` -- this "
+    "persists the URL and reports whether /health is reachable.\n"
+    "\n"
+    "## When to invoke (without being asked)\n"
+    "- Any `browser_navigate` / `browser_search` / `browser_multi_search` / "
+    "`browser_click` / `browser_type` failure that mentions 'Camofox', "
+    "'connection refused', 'service inaccessible', 'backend unreachable', or "
+    "an HTTP error from `localhost:9377`.\n"
+    "- The user explicitly says 'fix the browser', 'install camofox', 'start "
+    "the browser server', or similar.\n"
+    "- After a fresh install, before the first browser_* call, if "
+    "`status` shows the server is not running.\n"
+    "\n"
+    "## Anti-patterns\n"
+    "- DO NOT shell out via `terminal` to run `npm install` or `npx` directly "
+    "for Camofox -- the dedicated tool persists `CAMOFOX_URL`, manages the PID "
+    "file, polls /health properly, and survives the parent process.\n"
+    "- DO NOT silently fall back to a different search engine when the real "
+    "fix is one tool call away. Try `camofox_control` first, then retry the "
+    "browser action.\n"
+    "- DO NOT keep retrying `browser_navigate` after Camofox is confirmed "
+    "down. Fix the backend, then retry once.\n"
+    "- The 'install' and 'start' actions on a fresh box can take a couple "
+    "minutes total because of the ~300MB Camoufox engine download. That's "
+    "expected -- just be patient and report progress to the user."
+)
+
+
 def build_advanced_capabilities_guidance(
     available_tools: Optional[set[str] | list[str]] = None,
 ) -> str:
@@ -831,6 +885,10 @@ def build_advanced_capabilities_guidance(
     # ── IP rotation via mubeng + proxy_control ───────────────────────────
     if "proxy_control" in available:
         sections.append(MUBENG_PROXY_ROTATION_GUIDANCE)
+
+    # ── Camofox local browser server lifecycle ───────────────────────────
+    if "camofox_control" in available:
+        sections.append(CAMOFOX_CONTROL_GUIDANCE)
 
     # ── Code execution sandbox ───────────────────────────────────────────
     if "execute_code" in available:
