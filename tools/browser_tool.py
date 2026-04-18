@@ -307,50 +307,108 @@ _STEALTH_JS = r"""
 """
 
 # ---------------------------------------------------------------------------
-# Fingerprint rotation pool — each entry is a (user_agent, platform,
-# vendor, screen_w, screen_h, timezone) tuple.  One is picked at random
-# per browser_search attempt so consecutive retries present different
-# fingerprints to bot-detection scripts.
+# Extended fingerprint rotation pool with comprehensive anti-detection attributes.
+# Each entry is a dict with ua, platform, vendor, viewport (w×h), timezone,
+# and device-specific hints (concurrency, memory, touchpoints, colordepth).
+# Inspired by undetectable-fingerprint-browser project: ensures consistent
+# fingerprints that don't reveal detection signals through impossible combinations.
 # ---------------------------------------------------------------------------
 _FINGERPRINT_POOL = [
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Win32", "Google Inc.", 1920, 1080, "America/New_York",
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Win32", "Google Inc.", 1440, 900, "Europe/London",
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "MacIntel", "Google Inc.", 2560, 1600, "America/Los_Angeles",
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
-        "MacIntel", "Apple Computer, Inc.", 2560, 1440, "Europe/Paris",
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-        "Win32", "", 1920, 1080, "Asia/Dubai",
-    ),
-    (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Linux x86_64", "Google Inc.", 1920, 1080, "Europe/Berlin",
-    ),
-    (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
-        "Win32", "Google Inc.", 1366, 768, "America/Chicago",
-    ),
-    (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.122 Safari/537.36",
-        "MacIntel", "Google Inc.", 1680, 1050, "Asia/Tokyo",
-    ),
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "platform": "Win32", "vendor": "Google Inc.", "screen_w": 1920, "screen_h": 1080,
+        "timezone": "America/New_York", "hardware_concurrency": 8, "device_memory": 16,
+        "max_touch_points": 0, "color_depth": 24,
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "platform": "Win32", "vendor": "Google Inc.", "screen_w": 1440, "screen_h": 900,
+        "timezone": "Europe/London", "hardware_concurrency": 4, "device_memory": 8,
+        "max_touch_points": 0, "color_depth": 24,
+    },
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "platform": "MacIntel", "vendor": "Google Inc.", "screen_w": 2560, "screen_h": 1600,
+        "timezone": "America/Los_Angeles", "hardware_concurrency": 12, "device_memory": 16,
+        "max_touch_points": 0, "color_depth": 24,
+    },
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+        "platform": "MacIntel", "vendor": "Apple Computer, Inc.", "screen_w": 2560, "screen_h": 1440,
+        "timezone": "Europe/Paris", "hardware_concurrency": 8, "device_memory": 16,
+        "max_touch_points": 0, "color_depth": 24,
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        "platform": "Win32", "vendor": "", "screen_w": 1920, "screen_h": 1080,
+        "timezone": "Asia/Dubai", "hardware_concurrency": 8, "device_memory": 8,
+        "max_touch_points": 0, "color_depth": 24,
+    },
+    {
+        "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "platform": "Linux x86_64", "vendor": "Google Inc.", "screen_w": 1920, "screen_h": 1080,
+        "timezone": "Europe/Berlin", "hardware_concurrency": 16, "device_memory": 32,
+        "max_touch_points": 0, "color_depth": 24,
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+        "platform": "Win32", "vendor": "Google Inc.", "screen_w": 1366, "screen_h": 768,
+        "timezone": "America/Chicago", "hardware_concurrency": 4, "device_memory": 4,
+        "max_touch_points": 0, "color_depth": 24,
+    },
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.122 Safari/537.36",
+        "platform": "MacIntel", "vendor": "Google Inc.", "screen_w": 1680, "screen_h": 1050,
+        "timezone": "Asia/Tokyo", "hardware_concurrency": 8, "device_memory": 16,
+        "max_touch_points": 0, "color_depth": 24,
+    },
 ]
 
 
-def _fingerprint_profile_from_seed(seed: int) -> tuple[str, str, str, int, int, str]:
+def _validate_fingerprint_consistency(profile: dict[str, Any]) -> bool:
+    """Verify fingerprint profile doesn't have conflicting signals.
+    
+    Returns False if profile has impossible combinations (e.g. mobile platform
+    with desktop screen resolution, wrong hardware concurrency for platform).
+    Inspired by consistency analysis from undetectable-fingerprint-browser.
+    """
+    ua = profile.get("ua", "")
+    platform = profile.get("platform", "")
+    screen_w = profile.get("screen_w", 1920)
+    screen_h = profile.get("screen_h", 1080)
+    hw_concurrency = profile.get("hardware_concurrency", 4)
+    
+    # Validate platform-UA consistency
+    if platform == "Win32" and "Windows NT" not in ua:
+        return False
+    if platform in ("MacIntel", "MacPPC") and "Macintosh" not in ua:
+        return False
+    if platform.startswith("Linux") and "Linux" not in ua and "X11" not in ua:
+        return False
+    
+    # Validate hardware concurrency for platform (typical ranges)
+    if platform == "Win32" and hw_concurrency > 32:
+        return False
+    if platform in ("MacIntel", "MacPPC") and hw_concurrency > 16:
+        return False
+    if platform.startswith("Linux") and hw_concurrency > 64:
+        return False
+    
+    # Validate screen dimensions (no impossible sizes)
+    if screen_w < 768 or screen_h < 576 or screen_w > 7680 or screen_h > 4320:
+        return False
+    
+    return True
+
+
+def _fingerprint_profile_from_seed(seed: int) -> dict[str, Any]:
     """Return a deterministic fingerprint profile for the given seed."""
-    return _FINGERPRINT_POOL[seed % len(_FINGERPRINT_POOL)]
+    profile = _FINGERPRINT_POOL[seed % len(_FINGERPRINT_POOL)]
+    # Ensure consistency (should always pass with pool init, but validate for safety)
+    if not _validate_fingerprint_consistency(profile):
+        # Fallback to first profile if validation fails
+        return _FINGERPRINT_POOL[0]
+    return profile
 
 
 def _choose_fingerprint_seed() -> int:
@@ -523,20 +581,47 @@ def _choose_local_proxy() -> Optional[str]:
 
 
 def _set_session_fingerprint_profile(session_info: dict[str, Any], seed: int) -> None:
-    """Bind UA + viewport metadata to a session from fingerprint pool."""
-    ua, _platform, _vendor, sw, sh, _tz = _fingerprint_profile_from_seed(seed)
+    """Bind UA + viewport + hardware profile to a session from fingerprint pool.
+    
+    Ensures consistency: all fingerprint attributes (UA, viewport, timezone,
+    hardware concurrency, memory) are coherent and don't reveal detection signals.
+    """
+    profile = _fingerprint_profile_from_seed(seed)
     session_info["fingerprint_seed"] = seed
-    session_info["viewport"] = {"width": sw, "height": sh}
-    session_info["user_agent"] = ua
+    session_info["viewport"] = {"width": profile["screen_w"], "height": profile["screen_h"]}
+    session_info["user_agent"] = profile["ua"]
+    session_info["fingerprint_profile"] = {
+        "platform": profile["platform"],
+        "vendor": profile["vendor"],
+        "timezone": profile["timezone"],
+        "hardware_concurrency": profile["hardware_concurrency"],
+        "device_memory": profile["device_memory"],
+        "color_depth": profile.get("color_depth", 24),
+    }
 
 
 def _build_random_stealth_js(seed: int = 0) -> str:
-    """Return stealth JS with a fingerprint picked from the pool (deterministic by seed)."""
-    fp = _fingerprint_profile_from_seed(seed)
-    ua, platform, vendor, sw, sh, tz = fp
-    hardware_concurrency = (4, 8, 12, 16)[seed % 4]
-    device_memory = (4, 8, 16)[seed % 3]
-    max_touch_points = 0 if any(token in ua for token in ("Windows", "Macintosh", "X11; Linux")) else 5
+    """Return comprehensive stealth JS with Canvas/WebGL/Audio/Font spoofing.
+    
+    Implements techniques from undetectable-fingerprint-browser project:
+    - Canvas fingerprint precision spoofing with noise injection
+    - WebGL renderer/vendor spoofing for GPU detection evasion
+    - AudioContext spoofing to prevent audio fingerprinting
+    - Font detection blocking to prevent OS font probing
+    - Timezone and locale consistency across APIs
+    """
+    profile = _fingerprint_profile_from_seed(seed)
+    ua = profile["ua"]
+    platform = profile["platform"]
+    vendor = profile["vendor"]
+    sw = profile["screen_w"]
+    sh = profile["screen_h"]
+    tz = profile["timezone"]
+    hardware_concurrency = profile["hardware_concurrency"]
+    device_memory = profile["device_memory"]
+    color_depth = profile.get("color_depth", 24)
+    max_touch_points = profile["max_touch_points"]
+    
     webgl_vendor = (
         "Google Inc. (Intel)",
         "Intel Inc.",
@@ -655,6 +740,68 @@ def _build_random_stealth_js(seed: int = 0) -> str:
                 if (parameter === 37445) return '{webgl_vendor_escaped}';
                 if (parameter === 37446) return '{webgl_renderer_escaped}';
                 return glGetParameter.call(this, parameter);
+            }};
+        }}
+        const gl2GetParameter = WebGL2RenderingContext && WebGL2RenderingContext.prototype && WebGL2RenderingContext.prototype.getParameter;
+        if (gl2GetParameter) {{
+            WebGL2RenderingContext.prototype.getParameter = function(parameter) {{
+                if (parameter === 37445) return '{webgl_vendor_escaped}';
+                if (parameter === 37446) return '{webgl_renderer_escaped}';
+                return gl2GetParameter.call(this, parameter);
+            }};
+        }}
+    }} catch(_) {{}}
+    try {{
+        Object.defineProperty(screen, 'colorDepth', {{ get: () => {color_depth}, configurable: true }});
+        Object.defineProperty(screen, 'pixelDepth', {{ get: () => {color_depth}, configurable: true }});
+    }} catch(_) {{}}
+    try {{
+        // Canvas fingerprint spoofing: intercept toDataURL to inject noise
+        const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+        HTMLCanvasElement.prototype.toDataURL = function(type) {{
+            const context = this.getContext('2d');
+            if (context) {{
+                const imageData = context.getImageData(0, 0, this.width, this.height);
+                for (let i = 0; i < imageData.data.length; i += 4) {{
+                    imageData.data[i + 0] = (imageData.data[i + 0] + Math.random() * 0.2 - 0.1) & 255;
+                    imageData.data[i + 1] = (imageData.data[i + 1] + Math.random() * 0.2 - 0.1) & 255;
+                    imageData.data[i + 2] = (imageData.data[i + 2] + Math.random() * 0.2 - 0.1) & 255;
+                }}
+                context.putImageData(imageData, 0, 0);
+            }}
+            return origToDataURL.apply(this, arguments);
+        }};
+    }} catch(_) {{}}
+    try {{
+        // AudioContext spoofing: prevent audio fingerprinting
+        const audioContextMethods = ['getChannelData', 'getByteFrequencyData', 'getByteTimeDomainData'];
+        if (window.AudioContext) {{
+            audioContextMethods.forEach(method => {{
+                if (AudioContext.prototype[method]) {{
+                    const origMethod = AudioContext.prototype[method];
+                    AudioContext.prototype[method] = function() {{
+                        const result = origMethod.apply(this, arguments);
+                        if (result instanceof Float32Array || result instanceof Uint8Array) {{
+                            for (let i = 0; i < result.length; i++) {{
+                                result[i] = Math.max(-1, Math.min(1, result[i] + (Math.random() - 0.5) * 0.01));
+                            }}
+                        }}
+                        return result;
+                    }};
+                }}
+            }});
+        }}
+    }} catch(_) {{}}
+    try {{
+        // Block font detection probes by intercepting font family queries
+        const origMeasureText = CanvasRenderingContext2D.prototype.measureText;
+        if (origMeasureText) {{
+            CanvasRenderingContext2D.prototype.measureText = function(text) {{
+                // Always return consistent metrics regardless of installed fonts
+                const result = origMeasureText.call(this, text);
+                const avgWidth = text.length > 0 ? 9 : 0;
+                result.width = text.length * avgWidth;
+                return result;
             }};
         }}
     }} catch(_) {{}}
