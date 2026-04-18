@@ -218,9 +218,10 @@ def _build_current_facts_tool_guidance(available_tools: Optional[set[str] | list
         return (
             "use an available web-capable tool. Prefer web_search, web_source_search, "
             "or web_deep_search when present; use web_fetch or web_extract for known URLs; "
-            "use browser_navigate with browser_snapshot or browser_vision on a direct result "
-            "page or DuckDuckGo/Bing when search tools are unavailable; avoid Google result "
-            "pages because they often trigger bot detection"
+            "use browser_search when browser tools are your only search option; use "
+            "browser_navigate with browser_snapshot or browser_vision on a direct result "
+            "page or known URL for follow-up interaction; avoid Google result pages because "
+            "they often trigger bot detection"
         )
 
     available = set(available_tools)
@@ -233,9 +234,18 @@ def _build_current_facts_tool_guidance(available_tools: Optional[set[str] | list
         name for name in ("browser_snapshot", "browser_vision")
         if name in available
     ]
+    has_browser_search = "browser_search" in available
 
     browser_guidance = ""
-    if "browser_navigate" in available:
+    if has_browser_search:
+        browser_guidance = "use browser_search"
+        if "browser_navigate" in available:
+            browser_guidance += " for search, then use browser_navigate"
+            if browser_helpers:
+                browser_guidance += f" with {_join_tool_names(browser_helpers)}"
+            browser_guidance += " for direct result pages, known URLs, or follow-up interaction"
+        browser_guidance += "; avoid Google search pages because they often trigger bot detection"
+    elif "browser_navigate" in available:
         browser_guidance = "use browser_navigate"
         if browser_helpers:
             browser_guidance += f" with {_join_tool_names(browser_helpers)}"
@@ -280,6 +290,7 @@ def _build_missing_context_tool_examples(available_tools: Optional[set[str] | li
             "web_deep_search",
             "web_fetch",
             "web_extract",
+            "browser_search",
             "browser_navigate",
             "browser_snapshot",
             "browser_vision",

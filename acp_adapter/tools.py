@@ -33,6 +33,7 @@ TOOL_KIND_MAP: Dict[str, ToolKind] = {
     "web_extract": "fetch",
     # Browser
     "browser_navigate": "fetch",
+    "browser_search": "fetch",
     "browser_click": "execute",
     "browser_type": "execute",
     "browser_snapshot": "read",
@@ -85,6 +86,8 @@ def build_tool_title(tool_name: str, args: Dict[str, Any]) -> str:
         if urls:
             return f"extract: {urls[0]}" + (f" (+{len(urls)-1})" if len(urls) > 1 else "")
         return "web extract"
+    if tool_name == "browser_search":
+        return f"browser search: {args.get('query', '?')}"
     if tool_name == "delegate_task":
         goal = args.get("goal", "")
         if goal and len(goal) > 60:

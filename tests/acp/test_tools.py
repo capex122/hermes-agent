@@ -55,6 +55,9 @@ class TestToolKindMap:
     def test_tool_kind_browser_navigate(self):
         assert get_tool_kind("browser_navigate") == "fetch"
 
+    def test_tool_kind_browser_search(self):
+        assert get_tool_kind("browser_search") == "fetch"
+
     def test_unknown_tool_returns_other_kind(self):
         assert get_tool_kind("nonexistent_tool_xyz") == "other"
 
@@ -109,6 +112,10 @@ class TestBuildToolTitle:
     def test_web_search_title(self):
         title = build_tool_title("web_search", {"query": "python asyncio"})
         assert "python asyncio" in title
+
+    def test_browser_search_title(self):
+        title = build_tool_title("browser_search", {"query": "saudi clubs"})
+        assert "saudi clubs" in title
 
     def test_unknown_tool_uses_name(self):
         title = build_tool_title("some_new_tool", {"foo": "bar"})

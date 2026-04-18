@@ -316,3 +316,60 @@ class TestBotDetectionHandling:
         assert result["bot_detection_detected"] is True
         assert result["challenge_pattern"] == "verify you are human"
         assert result["snapshot"] == "Please verify you are human"
+
+    def test_navigate_rejects_google_search_homepage_with_guidance(self):
+        import json
+        import tools.browser_tool as bt
+
+        result = json.loads(bt.browser_navigate("www.google.com", task_id="test"))
+
+        assert result["success"] is False
+        assert result["discouraged_search_target"] is True
+        assert "browser_search" in result["error"]
+
+    def test_browser_search_falls_back_to_bing_after_first_engine_failure(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({
+                    "success": False,
+                    "error": "DuckDuckGo challenge",
+                    "bot_detection_detected": True,
+                }),
+                json.dumps({
+                    "success": True,
+                    "url": "https://www.bing.com/search?q=saudi+clubs",
+                    "title": "Bing results",
+                    "snapshot": "results page",
+                }),
+            ],
+        ) as mock_navigate:
+            result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
+
+        assert result["success"] is True
+        assert result["search_engine"] == "bing"
+        assert result["search_query"] == "saudi clubs"
+        assert result["attempted_engines"] == ["duckduckgo", "bing"]
+        assert "duckduckgo.com/?q=saudi+clubs" in mock_navigate.call_args_list[0].args[0]
+
+    def test_browser_search_reports_all_attempted_engines_on_failure(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(
+            bt,
+            "browser_navigate",
+            side_effect=[
+                json.dumps({"success": False, "error": "DuckDuckGo blocked", "bot_detection_detected": True}),
+                json.dumps({"success": False, "error": "Bing blocked"}),
+            ],
+        ):
+            result = json.loads(bt.browser_search("saudi clubs", task_id="test"))
+
+        assert result["success"] is False
+        assert result["attempted_engines"] == ["duckduckgo", "bing"]
+        assert result["bot_detection_detected"] is True

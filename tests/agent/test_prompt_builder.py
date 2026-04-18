@@ -1054,6 +1054,13 @@ class TestOpenAIModelExecutionGuidance:
         assert "DuckDuckGo/Bing results" in text
         assert "for example: browser_navigate, browser_snapshot, or browser_vision" in text
 
+    def test_dynamic_guidance_prefers_browser_search_when_available(self):
+        text = build_openai_model_execution_guidance(
+            {"browser_search", "browser_navigate", "browser_snapshot"}
+        )
+        assert "use browser_search" in text
+        assert "use browser_navigate with browser_snapshot" in text
+
 
 class TestSearchIntentGuidance:
     def test_guidance_prefers_web_search_for_plain_search_requests(self):
@@ -1070,6 +1077,13 @@ class TestSearchIntentGuidance:
         text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})
         assert "do not stop there" in text
         assert "before saying you cannot search" in text
+
+    def test_guidance_prefers_browser_search_when_loaded(self):
+        text = build_search_intent_guidance(
+            {"browser_search", "browser_navigate", "browser_snapshot", "search_files"}
+        )
+        assert "execute that search immediately: use browser_search" in text
+        assert "use browser_navigate with browser_snapshot" in text
 
     def test_guidance_handles_browser_only_web_lookup(self):
         text = build_search_intent_guidance(

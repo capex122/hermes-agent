@@ -3493,6 +3493,7 @@ class AIAgent:
             "web_deep_search",
             "web_fetch",
             "web_extract",
+            "browser_search",
             "browser_navigate",
             "browser_snapshot",
             "browser_vision",

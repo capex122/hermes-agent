@@ -711,6 +711,27 @@ class TestBuildSystemPrompt:
         assert "bot detection" in prompt
         assert "Use file search only when the user clearly refers to files" in prompt
 
+    def test_search_intent_guidance_prefers_browser_search_when_loaded(self):
+        with (
+            patch(
+                "run_agent.get_tool_definitions",
+                return_value=_make_tool_defs("browser_search", "browser_navigate", "browser_snapshot", "search_files"),
+            ),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-k...7890",
+                base_url="https://openrouter.ai/api/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            prompt = agent._build_system_prompt()
+
+        assert "execute that search immediately: use browser_search" in prompt
+        assert "use browser_navigate with browser_snapshot" in prompt
+
     def test_search_intent_guidance_prefers_terminal_for_simple_date_questions(self):
         with (
             patch(
@@ -944,6 +965,16 @@ class TestToolUseEnforcementConfig:
             "with browser_snapshot or browser_vision"
         ) in prompt
         assert "for example: browser_navigate, browser_snapshot, or browser_vision" in prompt
+
+    def test_gpt_prompt_prefers_browser_search_when_available(self):
+        agent = self._make_agent(
+            model="openai/gpt-4.1",
+            tool_use_enforcement="auto",
+            tool_names=("browser_search", "browser_navigate", "browser_snapshot"),
+        )
+        prompt = agent._build_system_prompt()
+        assert "use browser_search" in prompt
+        assert "use browser_navigate with browser_snapshot" in prompt
 
 
 class TestInvalidateSystemPrompt:
