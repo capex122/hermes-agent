@@ -6,7 +6,16 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.main import cmd_update, PROJECT_ROOT
+from hermes_cli.main import (
+    OFFICIAL_INSTALL_SCRIPT_URL,
+    OFFICIAL_REPO_URL,
+    OFFICIAL_REPO_URLS,
+    OFFICIAL_REPO_SLUG,
+    OFFICIAL_ZIP_URL_TEMPLATE,
+    PROJECT_ROOT,
+    _is_fork,
+    cmd_update,
+)
 
 
 def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
@@ -126,3 +135,18 @@ class TestCmdUpdateBranchFallback:
             mock_input.assert_not_called()
             captured = capsys.readouterr()
             assert "Non-interactive session" in captured.out
+
+
+class TestUpdateCanonicalRepo:
+    def test_official_repo_points_to_capex_repo(self):
+        assert OFFICIAL_REPO_SLUG == "capex122/hermes-agent"
+        assert OFFICIAL_REPO_URL == "https://github.com/capex122/hermes-agent.git"
+        assert OFFICIAL_INSTALL_SCRIPT_URL == "https://raw.githubusercontent.com/capex122/hermes-agent/main/scripts/install.sh"
+        assert OFFICIAL_ZIP_URL_TEMPLATE.format(branch="main") == "https://github.com/capex122/hermes-agent/archive/refs/heads/main.zip"
+        assert "https://github.com/capex122/hermes-agent" in OFFICIAL_REPO_URLS
+        assert "git@github.com:capex122/hermes-agent" in OFFICIAL_REPO_URLS
+
+    def test_is_fork_treats_capex_repo_as_official(self):
+        assert _is_fork("https://github.com/capex122/hermes-agent.git") is False
+        assert _is_fork("git@github.com:capex122/hermes-agent") is False
+        assert _is_fork("https://github.com/someone-else/hermes-agent.git") is True
