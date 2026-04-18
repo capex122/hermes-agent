@@ -600,6 +600,51 @@ def _set_session_fingerprint_profile(session_info: dict[str, Any], seed: int) ->
     }
 
 
+def _build_minified_stealth_js(profile: dict, ua: str, platform: str, vendor: str, sw: int, sh: int, tz: str,
+                                hardware_concurrency: int, device_memory: int, color_depth: int,
+                                max_touch_points: int, webgl_vendor: str, webgl_renderer: str,
+                                ua_data_platform: str, ua_brands: str) -> str:
+    """Build ultra-compact stealth JS with core + critical optional features."""
+    ua_esc = ua.replace("'", "\\'")
+    tz_esc = tz.replace("'", "\\'")
+    vendor_esc = vendor.replace("'", "\\'")
+    webgl_vendor_esc = webgl_vendor.replace("'", "\\'")
+    webgl_renderer_esc = webgl_renderer.replace("'", "\\'")
+    
+    # Build minified stealth JS - use string concatenation to avoid f-string brace hell
+    parts = [
+        "(function(){",
+        "const d=(o,p,v)=>{try{Object.defineProperty(o,p,{get:()=>v,configurable:!0})}catch(_){}};",
+        f"d(navigator,'webdriver',void 0);",
+        f"d(navigator,'userAgent','{ua_esc}');",
+        f"d(navigator,'platform','{platform}');",
+        f"d(navigator,'vendor','{vendor_esc}');",
+        f"d(navigator,'hardwareConcurrency',{hardware_concurrency});",
+        f"d(navigator,'deviceMemory',{device_memory});",
+        f"d(navigator,'maxTouchPoints',{max_touch_points});",
+        f"d(navigator,'pdfViewerEnabled',!0);d(navigator,'cookieEnabled',!0);d(navigator,'doNotTrack',null);",
+        f"d(screen,'width',{sw});d(screen,'height',{sh});",
+        f"d(screen,'colorDepth',{color_depth});d(screen,'pixelDepth',{color_depth});",
+        f"d(window,'outerWidth',{sw});d(window,'outerHeight',{sh});",
+        f"if(!navigator.userAgentData)d(navigator,'userAgentData',{{brands:{ua_brands},mobile:!1,platform:'{ua_data_platform}',getHighEntropyValues:async()=>{{return{{brands:{ua_brands},mobile:!1,platform:'{ua_data_platform}',architecture:'x86',bitness:'64'}}}}}});",
+        "if(!navigator.plugins.length)d(navigator,'plugins',[{name:'Chrome PDF Plugin',filename:'internal-pdf-viewer'}]);",
+        "if(!window.chrome)window.chrome={};",
+        f"const p=WebGLRenderingContext?.prototype?.getParameter;",
+        f"if(p){{WebGLRenderingContext.prototype.getParameter=function(e){{return 37445===e?'{webgl_vendor_esc}':37446===e?'{webgl_renderer_esc}':p.call(this,e)}}}};",
+        f"const g=WebGL2RenderingContext?.prototype?.getParameter;",
+        f"if(g){{WebGL2RenderingContext.prototype.getParameter=function(e){{return 37445===e?'{webgl_vendor_esc}':37446===e?'{webgl_renderer_esc}':g.call(this,e)}}}};",
+        "const c=HTMLCanvasElement?.prototype?.toDataURL;",
+        "if(c){{HTMLCanvasElement.prototype.toDataURL=function(){{try{{const x=this.getContext('2d');if(x){{const i=x.getImageData(0,0,this.width,this.height);for(let n=0;n<i.data.length;n+=4)i.data[n]^=(Math.random()*30)|0}}}}catch(_){{}}return c.apply(this,arguments)}}}};",
+        "try{{const a=AudioContext?.prototype?.getChannelData;if(a){{AudioContext.prototype.getChannelData=function(n){{const r=a.apply(this,arguments);if(r instanceof Float32Array)for(let i=0;i<r.length;i++)r[i]+=Math.random()*0.001-0.0005;return r}}}}}}catch(_){{}};",
+        "try{{const m=CanvasRenderingContext2D?.prototype?.measureText;if(m){{CanvasRenderingContext2D.prototype.measureText=function(t){{const r=m.call(this,t);return r.width=t.length*(this.font?7:8),r}}}}}}catch(_){{}};",
+        f"const o=Intl.DateTimeFormat;",
+        f"Intl.DateTimeFormat=function(...args){{const opts=args[1]||{{}};if(!opts.timeZone)opts.timeZone='{tz_esc}';return new o(args[0],opts)}};",
+        "Intl.DateTimeFormat.prototype=o.prototype;Intl.DateTimeFormat.supportedLocalesOf=o.supportedLocalesOf;",
+        "}})();",
+    ]
+    return "".join(parts)
+
+
 def _build_random_stealth_js(seed: int = 0) -> str:
     """Return comprehensive stealth JS with Canvas/WebGL/Audio/Font spoofing.
     
@@ -638,175 +683,13 @@ def _build_random_stealth_js(seed: int = 0) -> str:
         {"brand": "Google Chrome", "version": "124"},
         {"brand": "Not.A/Brand", "version": "24"},
     ])
-    ua_escaped = ua.replace("'", "\\'")
-    tz_escaped = tz.replace("'", "\\'")
-    vendor_escaped = vendor.replace("'", "\\'")
-    webgl_vendor_escaped = webgl_vendor.replace("'", "\\'")
-    webgl_renderer_escaped = webgl_renderer.replace("'", "\\'")
-    return f"""
-(function() {{
-    try {{ Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined, configurable: true }}); }} catch(_) {{}}
-    try {{
-        Object.defineProperty(navigator, 'userAgent', {{ get: () => '{ua_escaped}', configurable: true }});
-    }} catch(_) {{}}
-    try {{
-        Object.defineProperty(navigator, 'platform', {{ get: () => '{platform}', configurable: true }});
-    }} catch(_) {{}}
-    try {{
-        Object.defineProperty(navigator, 'vendor', {{ get: () => '{vendor_escaped}', configurable: true }});
-    }} catch(_) {{}}
-    try {{
-        Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {hardware_concurrency}, configurable: true }});
-        Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {device_memory}, configurable: true }});
-        Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => {max_touch_points}, configurable: true }});
-        Object.defineProperty(navigator, 'pdfViewerEnabled', {{ get: () => true, configurable: true }});
-    }} catch(_) {{}}
-    try {{
-        if (!navigator.userAgentData) {{
-            Object.defineProperty(navigator, 'userAgentData', {{
-                get: () => ({{
-                    brands: {ua_brands},
-                    mobile: false,
-                    platform: '{ua_data_platform}',
-                    getHighEntropyValues: async () => ({{
-                        brands: {ua_brands},
-                        mobile: false,
-                        platform: '{ua_data_platform}',
-                        architecture: 'x86',
-                        bitness: '64',
-                        model: '',
-                        platformVersion: '15.0.0',
-                        uaFullVersion: '124.0.0.0',
-                    }}),
-                }}),
-                configurable: true,
-            }});
-        }}
-    }} catch(_) {{}}
-    try {{
-        if (!navigator.plugins.length) {{
-            const fake = [
-                {{ name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }},
-                {{ name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' }},
-                {{ name: 'Native Client', filename: 'internal-nacl-plugin', description: '' }},
-            ];
-            Object.defineProperty(navigator, 'plugins', {{ get: () => fake, configurable: true }});
-        }}
-    }} catch(_) {{}}
-    try {{
-        if (!navigator.languages || !navigator.languages.length) {{
-            Object.defineProperty(navigator, 'languages', {{ get: () => ['en-US', 'en'], configurable: true }});
-        }}
-    }} catch(_) {{}}
-    try {{
-        if (!window.chrome) {{
-            window.chrome = {{ runtime: {{}}, loadTimes: function(){{}}, csi: function(){{}}, app: {{}} }};
-        }}
-    }} catch(_) {{}}
-    try {{
-        Object.defineProperty(screen, 'width',  {{ get: () => {sw}, configurable: true }});
-        Object.defineProperty(screen, 'height', {{ get: () => {sh}, configurable: true }});
-        Object.defineProperty(screen, 'availWidth',  {{ get: () => {sw}, configurable: true }});
-        Object.defineProperty(screen, 'availHeight', {{ get: () => {sh - 40}, configurable: true }});
-    }} catch(_) {{}}
-    try {{
-        Object.defineProperty(window, 'outerWidth', {{ get: () => {sw}, configurable: true }});
-        Object.defineProperty(window, 'outerHeight', {{ get: () => {sh}, configurable: true }});
-    }} catch(_) {{}}
-    try {{
-        const origDTF = Intl.DateTimeFormat;
-        Intl.DateTimeFormat = function(locale, opts) {{
-            if (!opts || !opts.timeZone) {{
-                opts = Object.assign({{timeZone: '{tz_escaped}'}}, opts);
-            }}
-            return new origDTF(locale, opts);
-        }};
-        Intl.DateTimeFormat.prototype = origDTF.prototype;
-        Intl.DateTimeFormat.supportedLocalesOf = origDTF.supportedLocalesOf;
-    }} catch(_) {{}}
-    try {{
-        const origQuery = window.navigator.permissions && window.navigator.permissions.query;
-        if (origQuery) {{
-            window.navigator.permissions.query = (params) =>
-                params.name === 'notifications'
-                    ? Promise.resolve({{ state: Notification.permission }})
-                    : origQuery.call(window.navigator.permissions, params);
-        }}
-    }} catch(_) {{}}
-    try {{
-        const glGetParameter = WebGLRenderingContext && WebGLRenderingContext.prototype && WebGLRenderingContext.prototype.getParameter;
-        if (glGetParameter) {{
-            WebGLRenderingContext.prototype.getParameter = function(parameter) {{
-                if (parameter === 37445) return '{webgl_vendor_escaped}';
-                if (parameter === 37446) return '{webgl_renderer_escaped}';
-                return glGetParameter.call(this, parameter);
-            }};
-        }}
-        const gl2GetParameter = WebGL2RenderingContext && WebGL2RenderingContext.prototype && WebGL2RenderingContext.prototype.getParameter;
-        if (gl2GetParameter) {{
-            WebGL2RenderingContext.prototype.getParameter = function(parameter) {{
-                if (parameter === 37445) return '{webgl_vendor_escaped}';
-                if (parameter === 37446) return '{webgl_renderer_escaped}';
-                return gl2GetParameter.call(this, parameter);
-            }};
-        }}
-    }} catch(_) {{}}
-    try {{
-        Object.defineProperty(screen, 'colorDepth', {{ get: () => {color_depth}, configurable: true }});
-        Object.defineProperty(screen, 'pixelDepth', {{ get: () => {color_depth}, configurable: true }});
-    }} catch(_) {{}}
-    try {{
-        // Canvas fingerprint spoofing: intercept toDataURL to inject noise
-        const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
-        HTMLCanvasElement.prototype.toDataURL = function(type) {{
-            const context = this.getContext('2d');
-            if (context) {{
-                const imageData = context.getImageData(0, 0, this.width, this.height);
-                for (let i = 0; i < imageData.data.length; i += 4) {{
-                    imageData.data[i + 0] = (imageData.data[i + 0] + Math.random() * 0.2 - 0.1) & 255;
-                    imageData.data[i + 1] = (imageData.data[i + 1] + Math.random() * 0.2 - 0.1) & 255;
-                    imageData.data[i + 2] = (imageData.data[i + 2] + Math.random() * 0.2 - 0.1) & 255;
-                }}
-                context.putImageData(imageData, 0, 0);
-            }}
-            return origToDataURL.apply(this, arguments);
-        }};
-    }} catch(_) {{}}
-    try {{
-        // AudioContext spoofing: prevent audio fingerprinting
-        const audioContextMethods = ['getChannelData', 'getByteFrequencyData', 'getByteTimeDomainData'];
-        if (window.AudioContext) {{
-            audioContextMethods.forEach(method => {{
-                if (AudioContext.prototype[method]) {{
-                    const origMethod = AudioContext.prototype[method];
-                    AudioContext.prototype[method] = function() {{
-                        const result = origMethod.apply(this, arguments);
-                        if (result instanceof Float32Array || result instanceof Uint8Array) {{
-                            for (let i = 0; i < result.length; i++) {{
-                                result[i] = Math.max(-1, Math.min(1, result[i] + (Math.random() - 0.5) * 0.01));
-                            }}
-                        }}
-                        return result;
-                    }};
-                }}
-            }});
-        }}
-    }} catch(_) {{}}
-    try {{
-        // Block font detection probes by intercepting font family queries
-        const origMeasureText = CanvasRenderingContext2D.prototype.measureText;
-        if (origMeasureText) {{
-            CanvasRenderingContext2D.prototype.measureText = function(text) {{
-                // Always return consistent metrics regardless of installed fonts
-                const result = origMeasureText.call(this, text);
-                const avgWidth = text.length > 0 ? 9 : 0;
-                result.width = text.length * avgWidth;
-                return result;
-            }};
-        }}
-    }} catch(_) {{}}
-}})();
-"""
+    # Use minified stealth injection to reduce command-line length  
+    return _build_minified_stealth_js(
+        profile, ua, platform, vendor, sw, sh, tz,
+        hardware_concurrency, device_memory, color_depth,
+        max_touch_points, webgl_vendor, webgl_renderer,
+        ua_data_platform, ua_brands
+    )
 
 
 def _apply_local_stealth_profile(task_id: str, seed: Optional[int] = None) -> Optional[int]:
