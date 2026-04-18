@@ -685,6 +685,8 @@ class TestBuildSystemPrompt:
         assert "# Action execution" in prompt
         assert "# Search intent resolution" in prompt
         assert "default to a web search rather than a file search" in prompt
+        assert "sports scores or match results from the last few days" in prompt
+        assert "before saying you cannot search" in prompt
 
     def test_search_intent_guidance_uses_browser_when_web_search_missing(self):
         with (
@@ -835,7 +837,7 @@ class TestToolUseEnforcementConfig:
         agent = self._make_agent(model="openai/gpt-4.1", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
-        assert "Current facts (weather, news, versions) → use web_search" in prompt
+        assert "Current or recent external facts (weather, news, sports results, prices, versions) → use web_search" in prompt
 
     def test_auto_injects_for_codex(self):
         from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
@@ -938,7 +940,7 @@ class TestToolUseEnforcementConfig:
         )
         prompt = agent._build_system_prompt()
         assert (
-            "Current facts (weather, news, versions) → use browser_navigate "
+            "Current or recent external facts (weather, news, sports results, prices, versions) → use browser_navigate "
             "with browser_snapshot or browser_vision"
         ) in prompt
         assert "for example: browser_navigate, browser_snapshot, or browser_vision" in prompt

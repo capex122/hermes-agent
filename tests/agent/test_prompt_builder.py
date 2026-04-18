@@ -1039,7 +1039,7 @@ class TestOpenAIModelExecutionGuidance:
         text = build_openai_model_execution_guidance(
             {"web_source_search", "browser_navigate", "browser_snapshot"}
         )
-        assert "Current facts (weather, news, versions) → use web_source_search" in text
+        assert "Current or recent external facts (weather, news, sports results, prices, versions) → use web_source_search" in text
         assert "if search tools are unavailable, use browser_navigate with browser_snapshot" in text
         assert "avoid Google search pages because they often trigger bot detection" in text
 
@@ -1048,7 +1048,7 @@ class TestOpenAIModelExecutionGuidance:
             {"browser_navigate", "browser_snapshot", "browser_vision"}
         )
         assert (
-            "Current facts (weather, news, versions) → use browser_navigate "
+            "Current or recent external facts (weather, news, sports results, prices, versions) → use browser_navigate "
             "with browser_snapshot or browser_vision"
         ) in text
         assert "DuckDuckGo/Bing results" in text
@@ -1060,6 +1060,16 @@ class TestSearchIntentGuidance:
         text = build_search_intent_guidance({"web_search", "search_files", "read_file"})
         assert "default to a web search rather than a file search" in text
         assert "Do not ask for confirmation" in text
+
+    def test_guidance_proactively_uses_web_lookup_for_recent_external_info(self):
+        text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})
+        assert "sports scores or match results from the last few days" in text
+        assert "proactively look it up: use web_search" in text
+
+    def test_guidance_retries_lookup_before_giving_up(self):
+        text = build_search_intent_guidance({"web_search", "browser_navigate", "browser_snapshot"})
+        assert "do not stop there" in text
+        assert "before saying you cannot search" in text
 
     def test_guidance_handles_browser_only_web_lookup(self):
         text = build_search_intent_guidance(
