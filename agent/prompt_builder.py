@@ -595,6 +595,252 @@ def build_browser_search_playbook(
     return "\n".join(sections)
 
 
+# ---------------------------------------------------------------------------
+# Advanced capabilities guidance — fingerprint rotation, MCP self-extension,
+# and cross-tool playbooks for non-obvious tools.
+# ---------------------------------------------------------------------------
+
+def build_advanced_capabilities_guidance(
+    available_tools: Optional[set[str] | list[str]] = None,
+) -> str:
+    """Detailed how-to instructions for the agent's most powerful but easily
+    missed capabilities: browser fingerprint pinning, MCP self-extension,
+    cross-platform messaging with media, code execution, and delegation.
+
+    Each section is gated on the relevant tool actually being available in
+    the current toolset, so non-browser/non-MCP surfaces don't pay the
+    prompt-cost for guidance they can't act on.
+    """
+    if available_tools is None:
+        available = set()
+    else:
+        available = set(available_tools)
+
+    sections: list[str] = []
+
+    # ── Browser fingerprint rotation (anti-bot) ──────────────────────────
+    if available & {"browser_search", "browser_multi_search", "browser_navigate"}:
+        sections.append(
+            "# Anti-bot fingerprint rotation\n"
+            "All three browser tools (`browser_navigate`, `browser_search`, "
+            "`browser_multi_search`) accept an optional `fingerprint_seed` integer that "
+            "pins a deterministic browser persona — User-Agent, platform, viewport, "
+            "timezone, hardware concurrency, GPU vendor/renderer. The seed indexes a "
+            "pool of consistent profiles (`seed % pool_size`).\n"
+            "Use it like this:\n"
+            "- DEFAULT BEHAVIOUR (omit `fingerprint_seed`): each session gets a random "
+            "jittered profile. This is fine for most queries.\n"
+            "- WHEN A SITE BLOCKS YOU REPEATEDLY: retry the SAME query/URL with an "
+            "explicit `fingerprint_seed` and a different value than last time. Try the "
+            "sequence 0, 2, 3, 5, 6, 7 to cycle through Windows-Chrome, Mac-Chrome, "
+            "Mac-Safari, Linux-Chrome, Windows-Edge, Mac-Chrome-other personas.\n"
+            "- FOR `browser_multi_search`: passing `fingerprint_seed=N` makes site `i` "
+            "use seed `N+i`, so all sites get distinct deterministic personas. Useful "
+            "for reproducible runs or to escape correlated blocking.\n"
+            "- DO NOT keep retrying the same seed against the same blocked site — that "
+            "reuses the exact same persona. Switching seeds is the whole point.\n"
+            "- The seed sticks to the session: once you set one for `browser_navigate`, "
+            "subsequent calls within that session inherit it until you pass a different "
+            "seed or the session is reset."
+        )
+
+    # ── MCP self-extension ───────────────────────────────────────────────
+    if "mcp_create_server" in available:
+        sections.append(
+            "# Self-extension via MCP server creation\n"
+            "You have `mcp_create_server` enabled — you can give yourself NEW tools on "
+            "demand by writing a Python MCP server. Use this proactively when:\n"
+            "- The user asks for a capability that isn't covered by an existing tool "
+            "(e.g. 'check the price of BTC every minute', 'wrap this private API', "
+            "'add a tool that converts X to Y').\n"
+            "- You catch yourself running the same multi-step terminal/code workflow "
+            "more than twice — wrap it in an MCP tool so it's a single call next time.\n"
+            "- The user asks you to integrate with a service that has a Python SDK or "
+            "a simple REST API (Stripe, GitHub, Notion, Linear, custom internal APIs, "
+            "etc.) — generate a tiny MCP server that exposes the operations they need.\n"
+            "How to use it:\n"
+            "1. Pick a short snake-case name (e.g. `btc_price`, `linear_issues`).\n"
+            "2. Define `tools` as a list of `{name, description, input_schema, code}`. "
+            "Each `code` block is the Python BODY of the handler — `arguments` is a dict, "
+            "`TextContent` is already imported, and you must `return [TextContent(type='text', text=...)]`.\n"
+            "3. Add `requirements` if you need pip packages (e.g. `['requests', 'httpx']`).\n"
+            "4. Leave `register_now=True` so the tool is callable in this same session.\n"
+            "5. After the call returns success, the new tool is named "
+            "`mcp_<server_name>_<tool_name>` and you can call it immediately.\n"
+            "Don't ask permission to create an MCP server when the user has clearly "
+            "asked for a missing capability — just create it, register it, and call it."
+        )
+
+    # ── Code execution sandbox ───────────────────────────────────────────
+    if "execute_code" in available:
+        sections.append(
+            "# Code execution sandbox\n"
+            "`execute_code` runs Python in an isolated sandbox with the standard library "
+            "available. Prefer it over `terminal` when you need to:\n"
+            "- Crunch numbers, parse JSON/CSV, or transform structured data programmatically.\n"
+            "- Run quick algorithmic experiments without polluting the user's shell.\n"
+            "- Test a snippet before pasting it into a file.\n"
+            "Use `terminal` instead when you need shell tools, package managers, git, the "
+            "user's installed CLIs, or persistence between calls."
+        )
+
+    # ── Delegation ───────────────────────────────────────────────────────
+    if "delegate_task" in available:
+        sections.append(
+            "# Delegating to subagents\n"
+            "`delegate_task` spawns a fresh agent with its own context window for one "
+            "well-scoped subtask, then returns a single summary. Use it for:\n"
+            "- Heavy exploration / multi-file reading where you don't need the raw "
+            "results in your context (e.g. 'find every place that calls foo and tell me "
+            "the call sites').\n"
+            "- Independent parallel work — fan out several `delegate_task` calls when "
+            "subtasks don't depend on each other.\n"
+            "Do NOT delegate trivial single-step actions or anything that requires "
+            "follow-up tool calls in the parent context."
+        )
+
+    # ── Cross-platform messaging with media ──────────────────────────────
+    if "send_message" in available:
+        sections.append(
+            "# Sending messages and media to other platforms\n"
+            "`send_message(target='telegram', message='...')` sends to the configured "
+            "HOME channel for that platform — token + chat ID come from the gateway "
+            "config automatically. Do NOT ask for a chat ID when the user says 'send to "
+            "telegram/discord/slack'; just call with the platform name.\n"
+            "To deliver an image/photo/video natively, embed it in `message` as "
+            "`![caption](https://example.com/file.jpg)` (markdown) or "
+            "`MEDIA:https://example.com/file.jpg` (legacy). Remote URLs are passed "
+            "through to the platform's native send_photo/send_video/send_document — no "
+            "local download required. Direct image-file URLs (e.g. from "
+            "`browser_search` `image_results[i].url`) work; webpage URLs do not."
+        )
+
+    return "\n\n".join(sections)
+
+
+# ---------------------------------------------------------------------------
+# Advanced capabilities guidance — fingerprint rotation, MCP self-extension,
+# and cross-tool playbooks for non-obvious tools.
+# ---------------------------------------------------------------------------
+
+def build_advanced_capabilities_guidance(
+    available_tools: Optional[set[str] | list[str]] = None,
+) -> str:
+    """Detailed how-to instructions for the agent's most powerful but easily
+    missed capabilities: browser fingerprint pinning, MCP self-extension,
+    cross-platform messaging with media, code execution, and delegation.
+
+    Each section is gated on the relevant tool actually being available in
+    the current toolset, so non-browser/non-MCP surfaces don't pay the
+    prompt-cost for guidance they can't act on.
+    """
+    if available_tools is None:
+        available = set()
+    else:
+        available = set(available_tools)
+
+    sections: list[str] = []
+
+    # ── Browser fingerprint rotation (anti-bot) ──────────────────────────
+    if available & {"browser_search", "browser_multi_search", "browser_navigate"}:
+        sections.append(
+            "# Anti-bot fingerprint rotation\n"
+            "All three browser tools (`browser_navigate`, `browser_search`, "
+            "`browser_multi_search`) accept an optional `fingerprint_seed` integer that "
+            "pins a deterministic browser persona — User-Agent, platform, viewport, "
+            "timezone, hardware concurrency, GPU vendor/renderer. The seed indexes a "
+            "pool of consistent profiles (`seed % pool_size`).\n"
+            "Use it like this:\n"
+            "- DEFAULT BEHAVIOUR (omit `fingerprint_seed`): each session gets a random "
+            "jittered profile. This is fine for most queries.\n"
+            "- WHEN A SITE BLOCKS YOU REPEATEDLY: retry the SAME query/URL with an "
+            "explicit `fingerprint_seed` and a different value than last time. Try the "
+            "sequence 0, 2, 3, 5, 6, 7 to cycle through Windows-Chrome, Mac-Chrome, "
+            "Mac-Safari, Linux-Chrome, Windows-Edge, Mac-Chrome-other personas.\n"
+            "- FOR `browser_multi_search`: passing `fingerprint_seed=N` makes site `i` "
+            "use seed `N+i`, so all sites get distinct deterministic personas. Useful "
+            "for reproducible runs or to escape correlated blocking.\n"
+            "- DO NOT keep retrying the same seed against the same blocked site — that "
+            "reuses the exact same persona. Switching seeds is the whole point.\n"
+            "- The seed sticks to the session: once you set one for `browser_navigate`, "
+            "subsequent calls within that session inherit it until you pass a different "
+            "seed or the session is reset."
+        )
+
+    # ── MCP self-extension ───────────────────────────────────────────────
+    if "mcp_create_server" in available:
+        sections.append(
+            "# Self-extension via MCP server creation\n"
+            "You have `mcp_create_server` enabled — you can give yourself NEW tools on "
+            "demand by writing a Python MCP server. Use this proactively when:\n"
+            "- The user asks for a capability that isn't covered by an existing tool "
+            "(e.g. 'check the price of BTC every minute', 'wrap this private API', "
+            "'add a tool that converts X to Y').\n"
+            "- You catch yourself running the same multi-step terminal/code workflow "
+            "more than twice — wrap it in an MCP tool so it's a single call next time.\n"
+            "- The user asks you to integrate with a service that has a Python SDK or "
+            "a simple REST API (Stripe, GitHub, Notion, Linear, custom internal APIs, "
+            "etc.) — generate a tiny MCP server that exposes the operations they need.\n"
+            "How to use it:\n"
+            "1. Pick a short snake-case name (e.g. `btc_price`, `linear_issues`).\n"
+            "2. Define `tools` as a list of `{name, description, input_schema, code}`. "
+            "Each `code` block is the Python BODY of the handler — `arguments` is a dict, "
+            "`TextContent` is already imported, and you must `return [TextContent(type='text', text=...)]`.\n"
+            "3. Add `requirements` if you need pip packages (e.g. `['requests', 'httpx']`).\n"
+            "4. Leave `register_now=True` so the tool is callable in this same session.\n"
+            "5. After the call returns success, the new tool is named "
+            "`mcp_<server_name>_<tool_name>` and you can call it immediately.\n"
+            "Don't ask permission to create an MCP server when the user has clearly "
+            "asked for a missing capability — just create it, register it, and call it."
+        )
+
+    # ── Code execution sandbox ───────────────────────────────────────────
+    if "execute_code" in available:
+        sections.append(
+            "# Code execution sandbox\n"
+            "`execute_code` runs Python in an isolated sandbox with the standard library "
+            "available. Prefer it over `terminal` when you need to:\n"
+            "- Crunch numbers, parse JSON/CSV, or transform structured data programmatically.\n"
+            "- Run quick algorithmic experiments without polluting the user's shell.\n"
+            "- Test a snippet before pasting it into a file.\n"
+            "Use `terminal` instead when you need shell tools, package managers, git, the "
+            "user's installed CLIs, or persistence between calls."
+        )
+
+    # ── Delegation ───────────────────────────────────────────────────────
+    if "delegate_task" in available:
+        sections.append(
+            "# Delegating to subagents\n"
+            "`delegate_task` spawns a fresh agent with its own context window for one "
+            "well-scoped subtask, then returns a single summary. Use it for:\n"
+            "- Heavy exploration / multi-file reading where you don't need the raw "
+            "results in your context (e.g. 'find every place that calls foo and tell me "
+            "the call sites').\n"
+            "- Independent parallel work — fan out several `delegate_task` calls when "
+            "subtasks don't depend on each other.\n"
+            "Do NOT delegate trivial single-step actions or anything that requires "
+            "follow-up tool calls in the parent context."
+        )
+
+    # ── Cross-platform messaging with media ──────────────────────────────
+    if "send_message" in available:
+        sections.append(
+            "# Sending messages and media to other platforms\n"
+            "`send_message(target='telegram', message='...')` sends to the configured "
+            "HOME channel for that platform — token + chat ID come from the gateway "
+            "config automatically. Do NOT ask for a chat ID when the user says 'send to "
+            "telegram/discord/slack'; just call with the platform name.\n"
+            "To deliver an image/photo/video natively, embed it in `message` as "
+            "`![caption](https://example.com/file.jpg)` (markdown) or "
+            "`MEDIA:https://example.com/file.jpg` (legacy). Remote URLs are passed "
+            "through to the platform's native send_photo/send_video/send_document — no "
+            "local download required. Direct image-file URLs (e.g. from "
+            "`browser_search` `image_results[i].url`) work; webpage URLs do not."
+        )
+
+    return "\n\n".join(sections)
+
+
 def build_openai_model_execution_guidance(
     available_tools: Optional[set[str] | list[str]] = None,
 ) -> str:

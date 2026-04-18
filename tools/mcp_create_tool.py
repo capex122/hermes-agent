@@ -2,12 +2,17 @@
 mcp_create_server tool — let the agent generate, install, and register a new
 MCP (Model Context Protocol) server from a spec.
 
-This is an OWNER-AUTHORIZED tool. It is gated behind one of:
-  - env var ``HERMES_ALLOW_MCP_CREATE=1`` (or true/yes/on)
-  - config flag ``tools.mcp_create.enabled: true`` in ~/.hermes/config.yaml
+This tool is ENABLED BY DEFAULT so the agent can extend itself with new tools
+on demand. To explicitly disable it, set one of:
+  - env var ``HERMES_DISABLE_MCP_CREATE=1`` (or true/yes/on)
+  - config flag ``tools.mcp_create.enabled: false`` in ~/.hermes/config.yaml
 
-When the gate is closed, the tool is registered but ``check_fn`` returns
-False, so the model cannot call it.
+Legacy explicit-allow knobs are still honoured for back-compat:
+  - env var ``HERMES_ALLOW_MCP_CREATE=0`` will disable
+  - ``tools.mcp_create.enabled: false`` will disable
+
+When disabled, the tool is registered but ``check_fn`` returns False, so the
+model cannot call it.
 
 What it does
 ------------
@@ -35,7 +40,7 @@ Safety
   traversal possible.
 - Generated handler code is *executed by the MCP server process*, which is
   spawned as a subprocess by Hermes. It runs with the same privileges as
-  Hermes itself. Treat the gate as the only line of defense.
+  Hermes itself. Set HERMES_DISABLE_MCP_CREATE=1 if you want the gate closed.
 """
 
 from __future__ import annotations
@@ -57,19 +62,37 @@ from tools.registry import registry, tool_error
 
 
 def _gate_open() -> bool:
-    """Return True iff the owner has opted into MCP server creation."""
-    env = os.environ.get("HERMES_ALLOW_MCP_CREATE", "").strip().lower()
-    if env in ("1", "true", "yes", "on"):
+    """Return True if MCP server creation is allowed.
+
+    Enabled by default. Honours both an explicit-disable knob
+    (``HERMES_DISABLE_MCP_CREATE``) and the legacy explicit-allow knob
+    (``HERMES_ALLOW_MCP_CREATE``) for back-compat.
+    """
+    # Explicit disable wins.
+    disable_env = os.environ.get("HERMES_DISABLE_MCP_CREATE", "").strip().lower()
+    if disable_env in ("1", "true", "yes", "on"):
+        return False
+
+    # Legacy explicit allow knob (still honoured both directions for back-compat).
+    allow_env = os.environ.get("HERMES_ALLOW_MCP_CREATE", "").strip().lower()
+    if allow_env in ("0", "false", "no", "off"):
+        return False
+    if allow_env in ("1", "true", "yes", "on"):
         return True
+
+    # Config file: explicit ``enabled: false`` disables; otherwise default-on.
     try:
         from hermes_cli.config import load_config
 
         cfg = load_config() or {}
         section = cfg.get("tools", {}) or {}
         sub = section.get("mcp_create", {}) or {}
-        return bool(sub.get("enabled", False))
+        if "enabled" in sub:
+            return bool(sub.get("enabled"))
     except Exception:
-        return False
+        pass
+
+    return True
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -240,9 +263,9 @@ def mcp_create_server(
     # ── Gate ────────────────────────────────────────────────────────────
     if not _gate_open():
         return tool_error(
-            "mcp_create_server is disabled. The owner must enable it explicitly by "
-            "setting HERMES_ALLOW_MCP_CREATE=1 in ~/.hermes/.env or "
-            "tools.mcp_create.enabled: true in ~/.hermes/config.yaml."
+            "mcp_create_server is disabled. Unset HERMES_DISABLE_MCP_CREATE in "
+            "~/.hermes/.env or set tools.mcp_create.enabled: true in "
+            "~/.hermes/config.yaml to re-enable."
         )
 
     # ── Validate inputs ─────────────────────────────────────────────────
@@ -358,14 +381,19 @@ def mcp_create_server(
 _SCHEMA = {
     "name": "mcp_create_server",
     "description": (
-        "Generate, install, and register a new Model Context Protocol (MCP) server. "
-        "Owner-gated: requires HERMES_ALLOW_MCP_CREATE=1 in ~/.hermes/.env or "
-        "tools.mcp_create.enabled: true in ~/.hermes/config.yaml. "
+        "Generate, install, and register a new Model Context Protocol (MCP) server "
+        "so you can give yourself a brand-new tool on demand. Enabled by default; "
+        "the owner can disable with HERMES_DISABLE_MCP_CREATE=1 or "
+        "tools.mcp_create.enabled: false in ~/.hermes/config.yaml. "
         "Writes a stdio Python MCP server to "
         f"{display_hermes_home()}/mcp_servers/<name>/server.py and adds an entry "
         "under mcp_servers.<name> in config.yaml. Each entry in `tools` becomes a "
-        "callable tool exposed to future Hermes sessions; `code` is the Python body "
-        "of the handler (must `return` a string or list[TextContent])."
+        "callable tool (named `mcp_<server>_<tool>`) exposed to this and future "
+        "Hermes sessions. `code` is the Python body of the handler (must `return` a "
+        "string or `[TextContent(type='text', text=...)]`). Use this when the user "
+        "asks for a capability you do not have, or when you find yourself running the "
+        "same custom workflow repeatedly — wrap it in an MCP server so it becomes a "
+        "first-class tool next time."
     ),
     "parameters": {
         "type": "object",

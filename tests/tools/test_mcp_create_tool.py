@@ -19,6 +19,7 @@ def closed_gate(tmp_path, monkeypatch):
     """HERMES_HOME set, but gate explicitly closed."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("HERMES_ALLOW_MCP_CREATE", raising=False)
+    monkeypatch.setenv("HERMES_DISABLE_MCP_CREATE", "1")
     return tmp_path
 
 

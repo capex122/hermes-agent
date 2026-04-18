@@ -94,7 +94,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
-from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, ACTION_EXECUTION_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, build_openai_model_execution_guidance, build_search_intent_guidance, build_browser_search_playbook
+from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, ACTION_EXECUTION_GUIDANCE, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, DEVELOPER_ROLE_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE, build_openai_model_execution_guidance, build_search_intent_guidance, build_browser_search_playbook, build_advanced_capabilities_guidance
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -3533,6 +3533,14 @@ class AIAgent:
         browser_playbook = build_browser_search_playbook(self.valid_tool_names)
         if browser_playbook:
             prompt_parts.append(browser_playbook)
+
+        # Detailed how-to instructions for advanced capabilities (browser
+        # fingerprint pinning, MCP self-extension, code execution, delegation,
+        # cross-platform messaging with media).  Each section is gated on the
+        # relevant tool being available, so unrelated surfaces pay nothing.
+        adv_capabilities = build_advanced_capabilities_guidance(self.valid_tool_names)
+        if adv_capabilities:
+            prompt_parts.append(adv_capabilities)
 
         nous_subscription_prompt = build_nous_subscription_prompt(self.valid_tool_names)
         if nous_subscription_prompt:

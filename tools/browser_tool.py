@@ -1363,13 +1363,34 @@ atexit.register(_stop_browser_cleanup_thread)
 BROWSER_TOOL_SCHEMAS = [
     {
         "name": "browser_navigate",
-        "description": "Navigate to a URL in the browser. Initializes the session and loads the page. Must be called before other browser tools. For simple information retrieval, prefer web_search or web_extract (faster, cheaper). When browser tools are your only search option, prefer browser_search instead of manually opening a search-engine homepage. Use browser tools when you need to interact with a page (click, fill forms, dynamic content) or open a specific known URL. Returns a compact page snapshot with interactive elements and ref IDs — no need to call browser_snapshot separately after navigating.",
+        "description": (
+            "Navigate to a URL in the browser. Initializes the session and loads the page. "
+            "Must be called before other browser tools. For simple information retrieval, prefer "
+            "web_search or web_extract (faster, cheaper). When browser tools are your only search "
+            "option, prefer browser_search instead of manually opening a search-engine homepage. "
+            "Use browser tools when you need to interact with a page (click, fill forms, dynamic "
+            "content) or open a specific known URL. Returns a compact page snapshot with interactive "
+            "elements and ref IDs — no need to call browser_snapshot separately after navigating.\n\n"
+            "Anti-bot tip: pass `fingerprint_seed` (an integer 0..N-1, where N is the size of the "
+            "local fingerprint pool) to pin a specific browser-fingerprint profile (UA, platform, "
+            "viewport, timezone, GPU). Useful when a site keeps blocking the default rotation — "
+            "try a different seed (e.g. 0=Win/Chrome, 2=Mac/Chrome, 3=Mac/Safari, 5=Linux/Chrome) "
+            "to switch persona. Omit for jittered random rotation per session."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "url": {
                     "type": "string",
                     "description": "The URL to navigate to (e.g., 'https://example.com')"
+                },
+                "fingerprint_seed": {
+                    "type": "integer",
+                    "description": (
+                        "Optional. Pin a deterministic browser fingerprint profile by seed index. "
+                        "Cycles through the pool with `seed % pool_size`. Omit for random rotation. "
+                        "Try 0–7 to switch persona when a site keeps detecting you."
+                    )
                 }
             },
             "required": ["url"]
@@ -1386,7 +1407,10 @@ BROWSER_TOOL_SCHEMAS = [
             "the full fallback_urls internally. Do NOT manually call browser_navigate on a bare "
             "hostname or stripped search-engine URL, and do NOT pretend the search succeeded. "
             "If another non-browser lookup tool is available, use that; otherwise report a "
-            "transient browser-side failure."
+            "transient browser-side failure.\n\n"
+            "Anti-bot tip: pass `fingerprint_seed` (integer) to pin a specific browser persona. "
+            "If the default rotation keeps getting blocked, retry the same query with a different "
+            "seed (try 0, 2, 3, 5 for Windows/Chrome, Mac/Chrome, Mac/Safari, Linux/Chrome)."
         ),
         "parameters": {
             "type": "object",
@@ -1394,6 +1418,14 @@ BROWSER_TOOL_SCHEMAS = [
                 "query": {
                     "type": "string",
                     "description": "The web search query to look up in the browser"
+                },
+                "fingerprint_seed": {
+                    "type": "integer",
+                    "description": (
+                        "Optional. Pin a browser-fingerprint profile by seed index. "
+                        "Use a different value (e.g. 0–7) to switch persona when a search "
+                        "engine is consistently flagging the default rotation as a bot."
+                    )
                 }
             },
             "required": ["query"]
@@ -1408,7 +1440,10 @@ BROWSER_TOOL_SCHEMAS = [
             "Each source provides a snapshot excerpt and structured links. "
             "After this tool returns, synthesise all 'snapshot_excerpt' fields into a detailed "
             "answer and list the site names consulted at the end. "
-            "This tool uses a different browser fingerprint per site to reduce bot detection."
+            "This tool uses a different browser fingerprint per site to reduce bot detection.\n\n"
+            "Anti-bot tip: pass `fingerprint_seed` (integer) as the BASE seed; each site then "
+            "uses `seed + i` for deterministic-but-distinct fingerprints across sites. Useful "
+            "when you want reproducible results or to retry with a different persona pool."
         ),
         "parameters": {
             "type": "object",
@@ -1421,6 +1456,13 @@ BROWSER_TOOL_SCHEMAS = [
                     "type": "integer",
                     "description": "Maximum number of sites to search (1-15, default 15)",
                     "default": 15
+                },
+                "fingerprint_seed": {
+                    "type": "integer",
+                    "description": (
+                        "Optional base seed. Each site gets `seed + index`, so all sites use "
+                        "deterministic but distinct fingerprint profiles. Omit for random rotation."
+                    )
                 }
             },
             "required": ["query"]
@@ -2857,6 +2899,7 @@ def browser_navigate(
     url: str,
     task_id: Optional[str] = None,
     _bot_retry_attempt: int = 0,
+    fingerprint_seed: Optional[int] = None,
 ) -> str:
     """
     Navigate to a URL in the browser.
@@ -2864,6 +2907,9 @@ def browser_navigate(
     Args:
         url: The URL to navigate to
         task_id: Task identifier for session isolation
+        fingerprint_seed: Optional integer to pin a deterministic fingerprint profile.
+            Cycles through ``_FINGERPRINT_POOL`` with ``seed % pool_size``. Omit for
+            random rotation per session.
         
     Returns:
         JSON string with navigation result (includes stealth features info on first nav)
@@ -2981,7 +3027,7 @@ def browser_navigate(
                 response["stealth_backend_override"] = _provider_registry_key(provider_override)
 
         # Apply a rotating stealth profile in local mode.
-        _apply_local_stealth_profile(effective_task_id)
+        _apply_local_stealth_profile(effective_task_id, seed=fingerprint_seed)
 
         # Auto-take a compact snapshot so the model can act immediately
         # without a separate browser_snapshot call.
@@ -3066,8 +3112,16 @@ def browser_navigate(
         }, ensure_ascii=False)
 
 
-def browser_search(query: str, task_id: Optional[str] = None) -> str:
-    """Search the web with browser-safe engines and retry across engines automatically."""
+def browser_search(query: str, task_id: Optional[str] = None, fingerprint_seed: Optional[int] = None) -> str:
+    """Search the web with browser-safe engines and retry across engines automatically.
+
+    Args:
+        query: The web search query.
+        task_id: Session id for isolation.
+        fingerprint_seed: Optional integer to pin a deterministic fingerprint profile.
+            Use a different seed (e.g. 0–7) to switch persona when bot detection keeps
+            blocking the default rotation.
+    """
     normalized_query = " ".join((query or "").split())
     if not normalized_query:
         return json.dumps({
@@ -3082,7 +3136,7 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
         "/" in normalized_query and not " " in normalized_query and "." in normalized_query.split("/")[0]
     ):
         nav_url = normalized_query if _lq.startswith(("http://", "https://")) else f"https://{normalized_query}"
-        result = json.loads(browser_navigate(nav_url, task_id=task_id))
+        result = json.loads(browser_navigate(nav_url, task_id=task_id, fingerprint_seed=fingerprint_seed))
         result["direct_navigation"] = True
         result["note"] = "Query looked like a URL — navigated directly instead of searching."
         if result.get("bot_detection_detected"):
@@ -3096,7 +3150,7 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
     last_result: dict[str, Any] = {}
 
     for engine, search_url in _build_browser_search_urls(normalized_query):
-        result = json.loads(browser_navigate(search_url, task_id=task_id))
+        result = json.loads(browser_navigate(search_url, task_id=task_id, fingerprint_seed=fingerprint_seed))
         unusable_reason = _browser_search_page_failure_reason(engine, result, normalized_query)
         source_results: list[dict[str, str]] = []
         clickable_results: list[dict[str, str]] = []
@@ -3258,7 +3312,7 @@ def browser_search(query: str, task_id: Optional[str] = None) -> str:
     )
 
 
-def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str] = None) -> str:
+def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str] = None, fingerprint_seed: Optional[int] = None) -> str:
     """Search up to 15 different sites and aggregate all results for the model.
 
     Each site that responds successfully contributes a `source` entry with:
@@ -3269,6 +3323,14 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
 
     The model then synthesises all sources and returns a summary to the user
     that includes the site names at the end.
+
+    Args:
+        query: Query to look up across multiple search engines / sites.
+        max_sites: Cap on number of sources to consult (1–15).
+        task_id: Session id for isolation.
+        fingerprint_seed: Optional BASE seed. Each site uses ``seed + index`` so all
+            sites get deterministic-but-distinct fingerprint personas. Omit for
+            random rotation per site.
     """
     normalized_query = " ".join((query or "").split())
     if not normalized_query:
@@ -3280,7 +3342,7 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
         "/" in normalized_query and not " " in normalized_query and "." in normalized_query.split("/")[0]
     ):
         nav_url = normalized_query if _lq.startswith(("http://", "https://")) else f"https://{normalized_query}"
-        result = json.loads(browser_navigate(nav_url, task_id=task_id))
+        result = json.loads(browser_navigate(nav_url, task_id=task_id, fingerprint_seed=fingerprint_seed))
         result["direct_navigation"] = True
         result["note"] = "Query looked like a URL — navigated directly instead of multi-searching."
         if result.get("bot_detection_detected"):
@@ -3313,14 +3375,15 @@ def browser_multi_search(query: str, max_sites: int = 15, task_id: Optional[str]
 
     sources: list[dict[str, Any]] = []
     blocked_engines: list[str] = []
-    for engine, url in all_engines:
+    for idx, (engine, url) in enumerate(all_engines):
         # Reset session between engines to get a fresh fingerprint/IP profile.
         try:
             cleanup_browser(task_id or "default")
         except Exception:
             pass
 
-        result = json.loads(browser_navigate(url, task_id=task_id))
+        per_site_seed = (fingerprint_seed + idx) if fingerprint_seed is not None else None
+        result = json.loads(browser_navigate(url, task_id=task_id, fingerprint_seed=per_site_seed))
         if not result.get("success"):
             blocked_engines.append(engine)
             continue
@@ -4325,7 +4388,11 @@ registry.register(
     name="browser_navigate",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_navigate"],
-    handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_navigate(
+        url=args.get("url", ""),
+        task_id=kw.get("task_id"),
+        fingerprint_seed=args.get("fingerprint_seed"),
+    ),
     check_fn=check_browser_requirements,
     emoji="🌐",
 )
@@ -4333,7 +4400,11 @@ registry.register(
     name="browser_search",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_search"],
-    handler=lambda args, **kw: browser_search(query=args.get("query", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_search(
+        query=args.get("query", ""),
+        task_id=kw.get("task_id"),
+        fingerprint_seed=args.get("fingerprint_seed"),
+    ),
     check_fn=check_browser_requirements,
     emoji="🔎",
 )
@@ -4345,6 +4416,7 @@ registry.register(
         query=args.get("query", ""),
         max_sites=int(args.get("max_sites", 15)),
         task_id=kw.get("task_id"),
+        fingerprint_seed=args.get("fingerprint_seed"),
     ),
     check_fn=check_browser_requirements,
     emoji="🔎",

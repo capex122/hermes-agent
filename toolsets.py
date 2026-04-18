@@ -56,7 +56,7 @@ _HERMES_CORE_TOOLS = [
     "execute_code", "delegate_task",
     # Cronjob management
     "cronjob",
-    # MCP server creation (gated on HERMES_ALLOW_MCP_CREATE via check_fn)
+    # MCP server creation (enabled by default; opt-out via HERMES_DISABLE_MCP_CREATE)
     "mcp_create_server",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
@@ -139,7 +139,7 @@ TOOLSETS = {
     },
 
     "mcp_create": {
-        "description": "Create new MCP servers on demand (owner-gated; requires HERMES_ALLOW_MCP_CREATE=1)",
+        "description": "Create new MCP servers on demand (enabled by default; opt-out via HERMES_DISABLE_MCP_CREATE=1)",
         "tools": ["mcp_create_server"],
         "includes": []
     },
