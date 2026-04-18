@@ -338,6 +338,8 @@ class TestBotDetectionHandling:
         import tools.browser_tool as bt
 
         with patch.object(bt, "_get_session_info", return_value={"_first_nav": False}), \
+             patch.object(bt, "_should_wait_for_bot_challenge", return_value=False), \
+             patch.object(bt, "_get_bot_detection_retry_limit", return_value=0), \
              patch.object(
                  bt,
                  "_run_browser_command",
@@ -359,6 +361,8 @@ class TestBotDetectionHandling:
         import tools.browser_tool as bt
 
         with patch.object(bt, "_get_session_info", return_value={"_first_nav": False}), \
+             patch.object(bt, "_should_wait_for_bot_challenge", return_value=False), \
+             patch.object(bt, "_get_bot_detection_retry_limit", return_value=0), \
              patch.object(
                  bt,
                  "_run_browser_command",
@@ -374,6 +378,57 @@ class TestBotDetectionHandling:
         assert result["bot_detection_detected"] is True
         assert result["challenge_pattern"] == "verify you are human"
         assert result["snapshot"] == "Please verify you are human"
+
+    def test_navigate_waits_once_for_transient_challenge_and_recovers(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "_get_session_info", return_value={"_first_nav": False}), \
+             patch.object(bt, "_get_bot_detection_retry_limit", return_value=0), \
+             patch("tools.browser_tool.time.sleep", return_value=None), \
+             patch.object(
+                 bt,
+                 "_run_browser_command",
+                 side_effect=[
+                     {"success": True, "data": {"title": "Protected Page", "url": "https://example.com"}},
+                     {"success": True, "data": {"result": "undefined"}},
+                     {"success": True, "data": {"snapshot": "Checking if the site connection is secure", "refs": {}}},
+                     {"success": True, "data": {"snapshot": '- link "Result one" [ref=e1]', "refs": {"e1": {}}}},
+                 ],
+             ):
+            result = json.loads(bt.browser_navigate("https://example.com", task_id="test"))
+
+        assert result["success"] is True
+        assert result["challenge_cleared_after_wait"] is True
+        assert result["element_count"] == 1
+
+    def test_navigate_retries_with_fresh_session_after_persistent_challenge(self):
+        import json
+        import tools.browser_tool as bt
+
+        with patch.object(bt, "_get_session_info", return_value={"_first_nav": False, "features": {"proxies": True}}), \
+             patch.object(bt, "_should_wait_for_bot_challenge", return_value=False), \
+             patch.object(bt, "_get_bot_detection_retry_limit", return_value=1), \
+             patch("tools.browser_tool.time.sleep", return_value=None), \
+             patch.object(bt, "cleanup_browser", return_value=None) as mock_cleanup, \
+             patch.object(
+                 bt,
+                 "_run_browser_command",
+                 side_effect=[
+                     {"success": True, "data": {"title": "Protected Page", "url": "https://example.com"}},
+                     {"success": True, "data": {"result": "undefined"}},
+                     {"success": True, "data": {"snapshot": "Please verify you are human", "refs": {}}},
+                     {"success": True, "data": {"title": "Normal Page", "url": "https://example.com"}},
+                     {"success": True, "data": {"result": "undefined"}},
+                     {"success": True, "data": {"snapshot": '- link "Recovered" [ref=e1]', "refs": {"e1": {}}}},
+                 ],
+             ):
+            result = json.loads(bt.browser_navigate("https://example.com", task_id="test"))
+
+        assert result["success"] is True
+        assert result["fresh_session_retry_attempted"] is True
+        assert result["fresh_session_retry_count"] == 1
+        mock_cleanup.assert_called_once_with("test")
 
     def test_navigate_rejects_google_search_homepage_with_guidance(self):
         import json
@@ -640,6 +695,9 @@ class TestFingerprintRotation:
         assert "userAgent" in js
         assert "platform" in js
         assert "screen" in js
+        assert "hardwareConcurrency" in js
+        assert "WebGLRenderingContext" in js
+        assert "userAgentData" in js
 
     def test_build_random_stealth_js_wraps_around_pool(self):
         """Seed modulo pool length must not raise."""

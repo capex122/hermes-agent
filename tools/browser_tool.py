@@ -54,6 +54,7 @@ import functools
 import json
 import logging
 import os
+import random
 import re
 import signal
 import subprocess
@@ -234,6 +235,24 @@ _BOT_DETECTION_PATTERNS = (
     "turnstile",
 )
 
+_TRANSIENT_BOT_DETECTION_HINTS = frozenset({
+    "just a moment",
+    "checking your browser",
+    "checking if the site connection is secure",
+    "please wait while we check your browser",
+    "security check",
+    "cloudflare",
+    "cf-ray",
+    "ray id",
+})
+
+_BOT_RETRYABLE_URL_HINTS = (
+    "bot.sannysoft.com",
+    "pixelscan.net",
+    "fingerprint-scan.com",
+    "arh.antoinevastel.com",
+)
+
 # ---------------------------------------------------------------------------
 # JS stealth patches injected after each navigation in local mode.
 # Masks the most common headless/bot fingerprint signals readable from JS.
@@ -328,9 +347,30 @@ def _build_random_stealth_js(seed: int = 0) -> str:
     """Return stealth JS with a fingerprint picked from the pool (deterministic by seed)."""
     fp = _FINGERPRINT_POOL[seed % len(_FINGERPRINT_POOL)]
     ua, platform, vendor, sw, sh, tz = fp
+    hardware_concurrency = (4, 8, 12, 16)[seed % 4]
+    device_memory = (4, 8, 16)[seed % 3]
+    max_touch_points = 0 if any(token in ua for token in ("Windows", "Macintosh", "X11; Linux")) else 5
+    webgl_vendor = (
+        "Google Inc. (Intel)",
+        "Intel Inc.",
+        "Google Inc. (Apple)",
+    )[seed % 3]
+    webgl_renderer = (
+        "ANGLE (Intel, Intel(R) UHD Graphics Direct3D11 vs_5_0 ps_5_0)",
+        "ANGLE (Apple, ANGLE Metal Renderer: Apple M2)",
+        "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620)",
+    )[seed % 3]
+    ua_data_platform = "Windows" if platform == "Win32" else ("macOS" if platform == "MacIntel" else "Linux")
+    ua_brands = json.dumps([
+        {"brand": "Chromium", "version": "124"},
+        {"brand": "Google Chrome", "version": "124"},
+        {"brand": "Not.A/Brand", "version": "24"},
+    ])
     ua_escaped = ua.replace("'", "\\'")
     tz_escaped = tz.replace("'", "\\'")
     vendor_escaped = vendor.replace("'", "\\'")
+    webgl_vendor_escaped = webgl_vendor.replace("'", "\\'")
+    webgl_renderer_escaped = webgl_renderer.replace("'", "\\'")
     return f"""
 (function() {{
     try {{ Object.defineProperty(navigator, 'webdriver', {{ get: () => undefined, configurable: true }}); }} catch(_) {{}}
@@ -342,6 +382,34 @@ def _build_random_stealth_js(seed: int = 0) -> str:
     }} catch(_) {{}}
     try {{
         Object.defineProperty(navigator, 'vendor', {{ get: () => '{vendor_escaped}', configurable: true }});
+    }} catch(_) {{}}
+    try {{
+        Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {hardware_concurrency}, configurable: true }});
+        Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {device_memory}, configurable: true }});
+        Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => {max_touch_points}, configurable: true }});
+        Object.defineProperty(navigator, 'pdfViewerEnabled', {{ get: () => true, configurable: true }});
+    }} catch(_) {{}}
+    try {{
+        if (!navigator.userAgentData) {{
+            Object.defineProperty(navigator, 'userAgentData', {{
+                get: () => ({{
+                    brands: {ua_brands},
+                    mobile: false,
+                    platform: '{ua_data_platform}',
+                    getHighEntropyValues: async () => ({{
+                        brands: {ua_brands},
+                        mobile: false,
+                        platform: '{ua_data_platform}',
+                        architecture: 'x86',
+                        bitness: '64',
+                        model: '',
+                        platformVersion: '15.0.0',
+                        uaFullVersion: '124.0.0.0',
+                    }}),
+                }}),
+                configurable: true,
+            }});
+        }}
     }} catch(_) {{}}
     try {{
         if (!navigator.plugins.length) {{
@@ -370,6 +438,10 @@ def _build_random_stealth_js(seed: int = 0) -> str:
         Object.defineProperty(screen, 'availHeight', {{ get: () => {sh - 40}, configurable: true }});
     }} catch(_) {{}}
     try {{
+        Object.defineProperty(window, 'outerWidth', {{ get: () => {sw}, configurable: true }});
+        Object.defineProperty(window, 'outerHeight', {{ get: () => {sh}, configurable: true }});
+    }} catch(_) {{}}
+    try {{
         const origDTF = Intl.DateTimeFormat;
         Intl.DateTimeFormat = function(locale, opts) {{
             if (!opts || !opts.timeZone) {{
@@ -389,8 +461,69 @@ def _build_random_stealth_js(seed: int = 0) -> str:
                     : origQuery.call(window.navigator.permissions, params);
         }}
     }} catch(_) {{}}
+    try {{
+        const glGetParameter = WebGLRenderingContext && WebGLRenderingContext.prototype && WebGLRenderingContext.prototype.getParameter;
+        if (glGetParameter) {{
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {{
+                if (parameter === 37445) return '{webgl_vendor_escaped}';
+                if (parameter === 37446) return '{webgl_renderer_escaped}';
+                return glGetParameter.call(this, parameter);
+            }};
+        }}
+    }} catch(_) {{}}
 }})();
 """
+
+
+def _apply_local_stealth_profile(task_id: str, seed: Optional[int] = None) -> Optional[int]:
+    """Best-effort local stealth injection with a rotating fingerprint profile."""
+    if not _is_local_backend():
+        return None
+    try:
+        fp_seed = seed if seed is not None else (int(time.time() * 1000) + random.randint(0, 997))
+        _run_browser_command(task_id, "eval", [_build_random_stealth_js(fp_seed)], timeout=5)
+        return fp_seed
+    except Exception:
+        return None
+
+
+def _capture_compact_snapshot(task_id: str) -> tuple[str, int]:
+    """Return a compact snapshot and element count for the current page."""
+    snap_result = _run_browser_command(task_id, "snapshot", ["-c"])
+    if not snap_result.get("success"):
+        return "", 0
+    snap_data = snap_result.get("data", {})
+    snapshot_text = snap_data.get("snapshot", "")
+    refs = snap_data.get("refs", {})
+    if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+        snapshot_text = _truncate_snapshot(snapshot_text)
+    return snapshot_text, len(refs) if refs else 0
+
+
+def _should_wait_for_bot_challenge(pattern: Optional[str], url: str) -> bool:
+    """Return whether the challenge looks transient enough to wait through once."""
+    if not pattern:
+        return False
+    normalized_pattern = pattern.lower()
+    if any(hint in normalized_pattern for hint in _TRANSIENT_BOT_DETECTION_HINTS):
+        return True
+    normalized_url = (url or "").lower()
+    return any(host in normalized_url for host in _BOT_RETRYABLE_URL_HINTS)
+
+
+def _bot_retry_delay_seconds(attempt: int) -> float:
+    """Jittered wait modeled after SeleniumBase reconnect timing."""
+    base = 2.0 + (attempt * 0.75)
+    return round(base + random.uniform(0.35, 1.1), 2)
+
+
+def _get_bot_detection_retry_limit() -> int:
+    """Return how many fresh-session retries are allowed after a challenge page."""
+    raw_value = os.environ.get("HERMES_BROWSER_BOT_RETRIES", "1")
+    try:
+        return max(0, min(int(raw_value), 3))
+    except ValueError:
+        return 1
 
 _BROWSER_SEARCH_ENGINES = (
     ("duckduckgo", "https://html.duckduckgo.com/html/?q={query}"),
@@ -1860,7 +1993,11 @@ def _browser_search_page_failure_reason(engine: str, result: dict[str, Any], que
 # Browser Tool Functions
 # ============================================================================
 
-def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
+def browser_navigate(
+    url: str,
+    task_id: Optional[str] = None,
+    _bot_retry_attempt: int = 0,
+) -> str:
     """
     Navigate to a URL in the browser.
     
@@ -1966,30 +2103,16 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 )
             response["stealth_features"] = active_features
 
-        # Apply stealth JS patches in local mode to mask headless fingerprints.
-        # Use a random fingerprint seed derived from the session call counter so
-        # consecutive navigations (and retries) present different profiles.
-        # Best-effort — silently ignored on failure or non-local backends.
-        if _is_local_backend():
-            try:
-                import time as _time
-                _fp_seed = int(_time.time() * 1000) % len(_FINGERPRINT_POOL)
-                _run_browser_command(effective_task_id, "eval", [_build_random_stealth_js(_fp_seed)], timeout=5)
-            except Exception:
-                pass
+        # Apply a rotating stealth profile in local mode.
+        _apply_local_stealth_profile(effective_task_id)
 
         # Auto-take a compact snapshot so the model can act immediately
         # without a separate browser_snapshot call.
         try:
-            snap_result = _run_browser_command(effective_task_id, "snapshot", ["-c"])
-            if snap_result.get("success"):
-                snap_data = snap_result.get("data", {})
-                snapshot_text = snap_data.get("snapshot", "")
-                refs = snap_data.get("refs", {})
-                if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
-                    snapshot_text = _truncate_snapshot(snapshot_text)
+            snapshot_text, element_count = _capture_compact_snapshot(effective_task_id)
+            if snapshot_text:
                 response["snapshot"] = snapshot_text
-                response["element_count"] = len(refs) if refs else 0
+            response["element_count"] = element_count
         except Exception as e:
             logger.debug("Auto-snapshot after navigate failed: %s", e)
 
@@ -1999,6 +2122,50 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             final_url,
         )
         if matched_pattern:
+            wait_seconds = None
+            if _should_wait_for_bot_challenge(matched_pattern, final_url or url):
+                wait_seconds = _bot_retry_delay_seconds(_bot_retry_attempt)
+                time.sleep(wait_seconds)
+                try:
+                    response["snapshot"], response["element_count"] = _capture_compact_snapshot(effective_task_id)
+                except Exception as e:
+                    logger.debug("Challenge re-snapshot after wait failed: %s", e)
+                matched_pattern = _detect_bot_detection_signal(
+                    title,
+                    response.get("snapshot", ""),
+                    final_url,
+                )
+                if not matched_pattern:
+                    response["challenge_cleared_after_wait"] = True
+                    response["challenge_wait_seconds"] = wait_seconds
+                    return json.dumps(response, ensure_ascii=False)
+
+            retry_limit = _get_bot_detection_retry_limit()
+            if _bot_retry_attempt < retry_limit:
+                logger.info(
+                    "bot challenge '%s' detected for %s; retrying with fresh browser session (%s/%s)",
+                    matched_pattern,
+                    final_url or url,
+                    _bot_retry_attempt + 1,
+                    retry_limit,
+                )
+                cleanup_browser(effective_task_id)
+                time.sleep(_bot_retry_delay_seconds(_bot_retry_attempt + 1))
+                retried = json.loads(
+                    browser_navigate(
+                        url,
+                        task_id=task_id,
+                        _bot_retry_attempt=_bot_retry_attempt + 1,
+                    )
+                )
+                retried["fresh_session_retry_attempted"] = True
+                retried["fresh_session_retry_count"] = _bot_retry_attempt + 1
+                retried["fresh_session_retry_reason"] = matched_pattern
+                if wait_seconds is not None:
+                    retried["challenge_wait_seconds"] = wait_seconds
+                return json.dumps(retried, ensure_ascii=False)
+
+            features = session_info.get("features", {}) if isinstance(session_info, dict) else {}
             return json.dumps(
                 {
                     "success": False,
@@ -2008,12 +2175,22 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                         "search/extract tools when available, or a deterministic local tool "
                         "such as terminal/execute_code when possible. If browser tools are your "
                         "only lookup option, retry immediately with browser_search or a direct "
-                        "DuckDuckGo/Bing result URL instead of stopping after this blocked page."
+                        "DuckDuckGo/Bing result URL instead of stopping after this blocked page. "
+                        "Hermes already waited through transient checks and retried with a fresh "
+                        "browser session/profile before reporting this failure."
                     ),
                     "bot_detection_detected": True,
                     "challenge_pattern": matched_pattern,
                     "url": final_url,
                     "title": title,
+                    "fresh_session_retry_attempted": _bot_retry_attempt > 0,
+                    "fresh_session_retry_count": _bot_retry_attempt,
+                    "network_rotation_possible": bool(
+                        features.get("proxies")
+                        or features.get("browser_use")
+                        or features.get("advanced_stealth")
+                    ),
+                    **({"challenge_wait_seconds": wait_seconds} if wait_seconds is not None else {}),
                     **({"snapshot": response["snapshot"]} if response.get("snapshot") else {}),
                 },
                 ensure_ascii=False,
