@@ -73,7 +73,7 @@ TOOLSETS = {
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",
-        "tools": ["web_search", "web_extract"],
+        "tools": ["web_search", "web_extract", "proxy_control"],
         "includes": []  # No other toolsets included
     },
     
@@ -119,7 +119,7 @@ TOOLSETS = {
             "browser_navigate", "browser_search", "browser_multi_search", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
-            "browser_vision", "browser_console", "web_search"
+            "browser_vision", "browser_console", "web_search", "proxy_control"
         ],
         "includes": []
     },
