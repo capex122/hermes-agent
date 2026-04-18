@@ -58,6 +58,8 @@ _HERMES_CORE_TOOLS = [
     "cronjob",
     # MCP server creation (enabled by default; opt-out via HERMES_DISABLE_MCP_CREATE)
     "mcp_create_server",
+    # In-process HTTP/HTTPS proxy switching (pairs with mubeng for IP rotation)
+    "proxy_control",
     # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
@@ -141,6 +143,12 @@ TOOLSETS = {
     "mcp_create": {
         "description": "Create new MCP servers on demand (enabled by default; opt-out via HERMES_DISABLE_MCP_CREATE=1)",
         "tools": ["mcp_create_server"],
+        "includes": []
+    },
+
+    "proxy": {
+        "description": "Switch the in-process HTTP/HTTPS proxy at runtime (pair with mubeng for IP rotation when search engines block you)",
+        "tools": ["proxy_control"],
         "includes": []
     },
     

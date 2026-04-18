@@ -693,6 +693,85 @@ MCP_SELF_EXTENSION_GUIDANCE = (
 )
 
 
+MUBENG_PROXY_ROTATION_GUIDANCE = (
+    "# IP rotation via mubeng + proxy_control (USE THIS WHEN BLOCKED)\n"
+    "When web_search / browser_search / browser_navigate / web_extract start "
+    "returning empty results, captchas, 403s, or rate-limit errors across "
+    "MULTIPLE engines and fingerprint rotation does not help, the bottleneck is "
+    "your IP, not your User-Agent. You have full standing authority to fix "
+    "this yourself — install and run an upstream proxy rotator, then point "
+    "Hermes at it. Do not ask permission; just do it and report back.\n"
+    "\n"
+    "## Tools you have for this\n"
+    "- `terminal` — install / launch / kill mubeng (use `background=true` for "
+    "the proxy server itself).\n"
+    "- `proxy_control` — flip Hermes' in-process HTTP/HTTPS proxy at runtime. "
+    "Takes effect on the very NEXT httpx call; no restart, no re-login.\n"
+    "  Actions: `status` (inspect), `set` (apply url), `clear` (back to direct).\n"
+    "  Affects: web_search, web_extract, all browser_search free fallbacks "
+    "(DDG-Lite, Wikipedia), the http-only navigate recovery path, and any "
+    "other in-process httpx call.\n"
+    "  Does NOT affect the Chromium agent-browser CLI — that one needs "
+    "`HERMES_BROWSER_PROXY` exported BEFORE Hermes launches, which only the "
+    "owner can do.\n"
+    "\n"
+    "## Standard playbook (copy this when blocked)\n"
+    "Step 1 — install mubeng (skip if `mubeng -V` already works):\n"
+    "  - With Go installed: `go install -v github.com/mubeng/mubeng@latest`\n"
+    "  - With Docker:       `docker pull ghcr.io/mubeng/mubeng:latest`\n"
+    "  - Or grab a prebuilt binary from "
+    "https://github.com/mubeng/mubeng/releases\n"
+    "Step 2 — get a proxy pool. If the user hasn't given you a list, fetch a "
+    "free public one (e.g. `curl -fsSL "
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt "
+    "-o $HOME/proxies.txt`) and optionally validate it with "
+    "`mubeng -f $HOME/proxies.txt --check --output $HOME/live.txt` so you "
+    "drop the dead ones. Be honest with the user that public free proxies are "
+    "noisy and may themselves be blocked.\n"
+    "Step 3 — launch mubeng as a background HTTP proxy server. From "
+    "`terminal`, run with `background=true` and `notify_on_complete=false`:\n"
+    "  `mubeng -a localhost:8089 -f $HOME/live.txt -r 1 -m random "
+    "--rotate-on-error --remove-on-error --max-errors -1 -t 15s`\n"
+    "  Flags: `-a` listen address, `-f` proxy file, `-r 1` rotate every "
+    "request, `-m random` random pick, `--rotate-on-error` switch on failure, "
+    "`--remove-on-error` drop dead proxies, `--max-errors -1` rotate forever, "
+    "`-t 15s` per-proxy timeout.\n"
+    "Step 4 — point Hermes' in-process HTTP at it:\n"
+    "  `proxy_control(action='set', url='http://localhost:8089', "
+    "no_proxy='localhost,127.0.0.1')`\n"
+    "Step 5 — retry the search/fetch that was failing. It now exits via a "
+    "different IP each request.\n"
+    "Step 6 — when done, `proxy_control(action='clear')` and (if you started "
+    "the mubeng process) kill it via `process(action='stop', name='mubeng')` "
+    "or terminal `pkill mubeng` / `taskkill /IM mubeng.exe /F`.\n"
+    "\n"
+    "## Variants & tips\n"
+    "- Per-request rotation can be too aggressive on slow public proxies — "
+    "try `-r 5` (rotate every 5 requests) if you're getting too many partial "
+    "fails.\n"
+    "- For sequential rotation (predictable, useful for pagination): "
+    "`-m sequent`.\n"
+    "- For SOCKS5 (Tor-style anonymity), point mubeng at a SOCKS pool — it "
+    "auto-detects the proxy protocol.\n"
+    "- mubeng listens on HTTP only even when fed SOCKS sources; that is "
+    "fine, httpx will tunnel CONNECT through it.\n"
+    "- If the user already has a single static proxy or VPN endpoint, skip "
+    "mubeng entirely — just call "
+    "`proxy_control(action='set', url='http://...')` directly.\n"
+    "- After 1-2 minutes if the proxy pool still gives mostly empty results, "
+    "fetch a fresher list and re-launch mubeng. Free proxies decay fast.\n"
+    "\n"
+    "## When NOT to do this\n"
+    "- A single search returning 0 results for an obscure query — the issue is "
+    "the query, not your IP. Reword first.\n"
+    "- The user is on a corporate network where outbound HTTP to random "
+    "proxies is blocked / monitored. Mention that risk if you suspect it.\n"
+    "- The user is asking you to scrape a service whose ToS forbids it. Don't "
+    "use proxy rotation to bypass legitimate access controls — only to recover "
+    "from generic anti-bot rate-limiting on public search endpoints."
+)
+
+
 def build_advanced_capabilities_guidance(
     available_tools: Optional[set[str] | list[str]] = None,
 ) -> str:
@@ -736,20 +815,18 @@ def build_advanced_capabilities_guidance(
             "subsequent calls within that session inherit it until you pass a different "
             "seed or the session is reset.\n"
             "- WHEN EVERY ENGINE FAILS WITH RATE-LIMITS / CAPTCHAS / EMPTY RESULTS: "
-            "the bottleneck is almost always your IP, not your fingerprint. The "
-            "owner can route ALL of Hermes' HTTP traffic through an upstream "
-            "rotating proxy (e.g. `mubeng -a localhost:8089 -f proxies.txt -r 1 "
-            "-m random`) by exporting `HTTPS_PROXY=http://localhost:8089` (and "
-            "`HTTP_PROXY=...`) before launching Hermes — httpx and the HTTP-only "
-            "fallbacks honour those env vars automatically. If you hit a wall of "
-            "search failures and the user is asking why, mention this as the "
-            "next-step they can take instead of pretending the problem is just "
-            "fingerprint variance."
+            "the bottleneck is your IP, not the fingerprint. Switch to the "
+            "mubeng + `proxy_control` playbook below — that section has the "
+            "step-by-step."
         )
 
     # ── MCP self-extension ───────────────────────────────────────────────
     if "mcp_create_server" in available:
         sections.append(MCP_SELF_EXTENSION_GUIDANCE)
+
+    # ── IP rotation via mubeng + proxy_control ───────────────────────────
+    if "proxy_control" in available:
+        sections.append(MUBENG_PROXY_ROTATION_GUIDANCE)
 
     # ── Code execution sandbox ───────────────────────────────────────────
     if "execute_code" in available:
